@@ -1177,19 +1177,19 @@
 
             <!-- Content Area -->
             <div class="content-area">
-                <div class="request-list" id="requestList">
+                <div class="request-list">
+                    <br>
                     <div class="requests-header">
                         <h2>HTTP Requests</h2>
                         <div class="header-actions">
-                            <div class="search-container">
-                                <input type="text" id="searchInput" placeholder="🔍 Search by URL, method, or status..." class="search-input">
-                            </div>
                             <button id="clearRequests" class="clear-btn">Clear All</button>
                         </div>
                     </div>
-                    <div class="loading" id="loading">
-                        <i class="fas fa-spinner"></i>
-                        <span>Loading requests...</span>
+                    <div id="requestList">
+                        <div class="loading" id="loading">
+                            <i class="fas fa-spinner fa-spin"></i>
+                            <span>Loading requests...</span>
+                        </div>
                     </div>
                 </div>
             </div>

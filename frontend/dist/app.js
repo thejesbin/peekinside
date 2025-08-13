@@ -94,25 +94,26 @@ class FluxManagerUI {
      * @param {string} query - Search query to filter by URL, method, or status
      */
     filterRequests(query) {
-        const rows = document.querySelectorAll('#requestsTableBody tr');
         const searchTerm = query.toLowerCase().trim();
         
-        rows.forEach(row => {
-            if (!searchTerm) {
-                row.style.display = '';
-                return;
-            }
-            
-            const url = row.querySelector('.request-url')?.textContent?.toLowerCase() || '';
-            const method = row.querySelector('.request-method-badge')?.textContent?.toLowerCase() || '';
-            const status = row.querySelector('.status-code')?.textContent?.toLowerCase() || '';
-            
-            const matches = url.includes(searchTerm) || 
-                          method.includes(searchTerm) || 
-                          status.includes(searchTerm);
-            
-            row.style.display = matches ? '' : 'none';
-        });
+        if (!searchTerm) {
+            // If no search term, show all requests
+            this.filteredRequests = [...this.requests];
+        } else {
+            // Filter requests based on search term
+            this.filteredRequests = this.requests.filter(request => {
+                const url = (request.path || request.url || '').toLowerCase();
+                const method = (request.method || '').toLowerCase();
+                const status = (request.response?.statusCode || '').toString().toLowerCase();
+                
+                return url.includes(searchTerm) || 
+                       method.includes(searchTerm) || 
+                       status.includes(searchTerm);
+            });
+        }
+        
+        // Re-render the filtered requests
+        this.renderRequests();
     }
 
     /**
@@ -546,7 +547,6 @@ class FluxManagerUI {
     populateOverviewTab(request) {
         // Request meta cards
         const requestMeta = document.getElementById('requestMeta');
-        const statusClass = this.getStatusClass(request.response?.statusCode);
         
         requestMeta.innerHTML = `
             <div class="meta-card">
