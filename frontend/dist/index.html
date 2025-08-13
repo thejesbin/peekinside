@@ -830,6 +830,214 @@
                 text-align: left;
             }
         }
+
+        /* Search and Header Styles */
+        .requests-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 0 20px;
+        }
+
+        .header-actions {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+        }
+
+        .search-container {
+            position: relative;
+        }
+
+        .search-input {
+            padding: 10px 15px;
+            border: 1px solid #444;
+            border-radius: 6px;
+            background: #2d2d2d;
+            color: #fff;
+            font-size: 14px;
+            width: 300px;
+            transition: all 0.3s ease;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: #8e44ad;
+            box-shadow: 0 0 0 2px rgba(142, 68, 173, 0.2);
+        }
+
+        .search-input::placeholder {
+            color: #888;
+        }
+
+        /* VSCode-style JSON Viewer */
+        .json-viewer-container {
+            background: #1e1e1e;
+            border: 1px solid #444;
+            border-radius: 6px;
+            padding: 15px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.4;
+            overflow-x: auto;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .json-string {
+            color: #ce9178;
+        }
+
+        .json-number {
+            color: #b5cea8;
+        }
+
+        .json-boolean {
+            color: #569cd6;
+        }
+
+        .json-null {
+            color: #569cd6;
+        }
+
+        .json-key {
+            color: #9cdcfe;
+        }
+
+        .json-bracket {
+            color: #ffd700;
+        }
+
+        .json-colon {
+            color: #fff;
+        }
+
+        .json-comma {
+            color: #fff;
+        }
+
+        .json-toggle {
+            color: #cccccc;
+            cursor: pointer;
+            user-select: none;
+            display: inline-block;
+            width: 12px;
+            margin-right: 5px;
+            font-size: 10px;
+            transition: color 0.2s ease;
+        }
+
+        .json-toggle:hover {
+            color: #fff;
+        }
+
+        .json-collapsible {
+            margin-left: 15px;
+        }
+
+        .json-plain {
+            color: #cccccc;
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        /* Authentication Section */
+        .auth-section {
+            margin-top: 20px;
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 6px;
+            border-left: 4px solid #8e44ad;
+        }
+
+        .auth-info {
+            margin-top: 10px;
+        }
+
+        .auth-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 8px;
+            padding: 8px;
+            background: #333;
+            border-radius: 4px;
+        }
+
+        .auth-label {
+            font-weight: bold;
+            color: #9cdcfe;
+            min-width: 80px;
+        }
+
+        .auth-value {
+            color: #ce9178;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            flex: 1;
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            color: #888;
+            font-style: italic;
+            padding: 20px;
+            background: #2a2a2a;
+            border-radius: 6px;
+            border: 1px dashed #444;
+        }
+
+        /* Improved Copy Button */
+        .copy-btn {
+            background: #8e44ad;
+            color: white;
+            border: none;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            transition: all 0.2s ease;
+        }
+
+        .copy-btn:hover {
+            background: #9b59b6;
+            transform: translateY(-1px);
+        }
+
+        /* Clear Button Improvements */
+        .clear-btn {
+            background: #e74c3c;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .clear-btn:hover {
+            background: #c0392b;
+            transform: translateY(-1px);
+        }
+
+        /* Modal Content Improvements */
+        .modal-content h4 {
+            color: #9cdcfe;
+            margin-bottom: 10px;
+            font-size: 16px;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+
+        /* Table Row Hover Effect */
+        #requestsTableBody tr:hover {
+            background: #2a2a2a;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(142, 68, 173, 0.1);
+        }
     </style>
 </head>
 <body>
@@ -970,6 +1178,15 @@
             <!-- Content Area -->
             <div class="content-area">
                 <div class="request-list" id="requestList">
+                    <div class="requests-header">
+                        <h2>HTTP Requests</h2>
+                        <div class="header-actions">
+                            <div class="search-container">
+                                <input type="text" id="searchInput" placeholder="🔍 Search by URL, method, or status..." class="search-input">
+                            </div>
+                            <button id="clearRequests" class="clear-btn">Clear All</button>
+                        </div>
+                    </div>
                     <div class="loading" id="loading">
                         <i class="fas fa-spinner"></i>
                         <span>Loading requests...</span>

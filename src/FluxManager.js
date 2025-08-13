@@ -236,16 +236,19 @@ class FluxManager {
     const requestData = {
       id: requestId,
       method: req.method,
-      path: parsedUrl.pathname,
       url: req.url,
-      headers: { ...req.headers },
-      query: this._parseQuery(parsedUrl.query),
+      path: req.url,
+      headers: req.headers,
+      query: req.query || {},
+      params: req.params || {},
       body: this._captureBody(req),
-      ip: req.connection.remoteAddress || req.socket.remoteAddress,
-      userAgent: req.headers['user-agent'],
-      timestamp: new Date().toISOString(),
-      startTime: startTime
+      ip: req.ip || req.connection?.remoteAddress || 'unknown',
+      userAgent: req.headers['user-agent'] || 'unknown',
+      timestamp: Date.now()
     };
+
+    // Capture request body
+    // requestData.body = this._captureBody(req);
 
     // Override res.end to capture response (works with any framework)
     const originalEnd = res.end;
@@ -497,6 +500,42 @@ class FluxManager {
   }
 
   /**
+   * Intercept Express app.listen() to automatically setup WebSocket
+   * This enables plug-and-play WebSocket without user intervention
+   * 
+   * @private
+   * @param {Express} app - Express application instance
+   */
+  _interceptAppListen(app) {
+    const originalListen = app.listen;
+    const self = this;
+    
+    app.listen = function(...args) {
+      // Call the original listen method
+      const server = originalListen.apply(this, args);
+      
+      // Automatically setup WebSocket on the created server
+      if (self.options.enableWebSocket !== false && !self.wss) {
+        self._setupWebSocket(server);
+      }
+      
+      return server;
+    };
+  }
+
+  /**
+   * Setup WebSocket on an existing HTTP server (for same-port integration)
+   * 
+   * @param {http.Server} server - HTTP server instance to attach WebSocket to
+   */
+  setupWebSocketOnServer(server) {
+    if (this.options.enableWebSocket && !this.wss) {
+      this._setupWebSocket(server);
+    }
+    return this;
+  }
+
+  /**
    * Setup WebSocket server with the HTTP server instance
    * Call this method after creating your HTTP server
    */
@@ -517,18 +556,14 @@ class FluxManager {
     });
 
     this.wss.on('connection', (ws) => {
-      console.log('FluxManager: WebSocket client connected');
       
       ws.on('close', () => {
-        console.log('FluxManager: WebSocket client disconnected');
       });
       
       ws.on('error', (error) => {
-        console.error('FluxManager: WebSocket error:', error);
       });
     });
     
-    console.log(`FluxManager: WebSocket server ready at ${this.options.route}/ws`);
   }
 
   /**
@@ -550,17 +585,73 @@ class FluxManager {
   }
 
   /**
-   * Capture request body safely
+   * Capture request body safely from various sources
+   * Works with body-parser middleware and raw requests
+   * 
+   * @private
+   * @param {http.IncomingMessage} req - HTTP request object
+   * @returns {string} Request body as string
    */
   _captureBody(req) {
     try {
-      if (req.body) {
-        return typeof req.body === 'string' ? req.body : JSON.stringify(req.body);
+      // If body is already parsed by middleware (e.g., body-parser, express.json())
+      if (req.body !== undefined) {
+        if (typeof req.body === 'string') {
+          return req.body;
+        }
+        if (typeof req.body === 'object') {
+          return JSON.stringify(req.body, null, 2);
+        }
+        return String(req.body);
       }
-      return '';
+
+      // Check for raw body in various Express properties
+      if (req.rawBody) {
+        return req.rawBody.toString();
+      }
+
+      // For methods that typically don't have body
+      if (['GET', 'HEAD', 'DELETE', 'OPTIONS'].includes(req.method)) {
+        return '';
+      }
+
+      // If we can't capture the body, return a helpful message
+      return '[Body not available - ensure body-parser middleware is used before FluxManager]';
     } catch (error) {
-      return '[Unable to capture body]';
+      return '[Error capturing body]';
     }
+  }
+
+  /**
+   * Extract authentication information from the request
+   * 
+   * @private
+   * @param {http.IncomingMessage} req - HTTP request object
+   * @returns {Object} Authentication information
+   */
+  _extractAuthInfo(req) {
+    const authInfo = {};
+
+    // Check for Bearer token in Authorization header
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      authInfo.token = authHeader.substring(7);
+    }
+
+    // Check for authentication cookies
+    const cookies = req.headers.cookie;
+    if (cookies) {
+      const cookieMap = {};
+      cookies.split(';').forEach(cookie => {
+        const [key, value] = cookie.trim().split('=');
+        cookieMap[key] = value;
+      });
+      if (cookieMap.auth_token) {
+        authInfo.token = cookieMap.auth_token;
+      }
+    }
+
+    return authInfo;
   }
 
   /**
@@ -699,6 +790,11 @@ class FluxManager {
           return this._serveFile(res, 'styles.css', 'text/css');
         }
         
+        // Dashboard UI
+        if (subPath === '/' || subPath === '') {
+          return this._serveDynamicHTML(res);
+        }
+        
         // Handle WebSocket upgrade requests
         if (req.path === '/ws') {
           // WebSocket will be handled by the WebSocket server
@@ -711,20 +807,21 @@ class FluxManager {
       
       // Add monitoring middleware
       app.use(this.expressMiddleware());
-      console.log('✅ Flux Manager attached to Express-like framework');
+      
+      // 🚀 WEBSOCKET AUTO-SETUP: Intercept app.listen() to automatically setup WebSocket
+      if (this.options.enableWebSocket !== false) {
+        this._interceptAppListen(app);
+      }
+      
     } else if (app && typeof app.addHook === 'function') {
       // Fastify
       this.fastifyHook(app);
-      console.log('✅ Flux Manager attached to Fastify');
     } else if (app && typeof app.emit === 'function') {
       // Native HTTP server
       this.wrapHttpServer(app);
-      console.log('✅ Flux Manager attached to native HTTP server');
     } else {
-      console.warn('⚠️  Framework not auto-detected. Use specific integration methods.');
+      console.warn('⚠️ Framework not auto-detected. Use specific integration methods.');
     }
-    
-    console.log(`🔍 Flux Manager dashboard: http://localhost:${this.options.port}${this.options.route}`);
     return this;
   }
 
