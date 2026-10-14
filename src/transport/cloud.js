@@ -56,7 +56,16 @@ process.stdin.on('data', (chunk) => { input += chunk; });
 process.stdin.on('end', () => {
   let job;
   try { job = JSON.parse(input); } catch (error) { process.exit(1); }
-  fetch(job.url, { method: 'POST', headers: job.headers, body: job.body, signal: AbortSignal.timeout(${CRASH_SEND_TIMEOUT_MS - 500}) })
+  const signal = AbortSignal.timeout(${CRASH_SEND_TIMEOUT_MS - 500});
+  const post = (url) => fetch(url, { method: 'POST', headers: job.headers, body: job.body, redirect: 'manual', signal });
+  post(job.url)
+    .then((response) => {
+      const location = response.headers.get('location');
+      if ((response.status !== 307 && response.status !== 308) || !location) return response;
+      const target = new URL(location, job.url);
+      const ok = job.follow.hosts.includes(target.hostname) && job.follow.protocols.includes(target.protocol) && target.pathname === job.follow.path && (target.port === '' || target.port === job.follow.port);
+      return ok ? post(target.href) : response;
+    })
     .then((response) => process.exit(response.ok ? ${SENT} : response.status === 400 || response.status === 413 ? ${REFUSED} : 2))
     .catch(() => process.exit(1));
 });
@@ -287,13 +296,21 @@ export class CloudTransport extends BatchTransport {
     };
   }
 
-  _post(body) {
-    return fetch(this.endpoint, {
+  // Posts to the endpoint. A redirect to the site's twin (see redirectTarget) is followed here,
+  // with the API key, and remembered; fetch() would follow it but drop the key.
+  async _post(body) {
+    const post = (url) => fetch(url, {
       method: 'POST',
       headers: this._headers(),
       body,
+      redirect: 'manual',
       signal: AbortSignal.timeout(this.exiting ? EXIT_TIMEOUT_MS : REQUEST_TIMEOUT_MS)
     });
+    const response = await post(this.endpoint);
+    const moved = redirectTarget(response, this.endpoint);
+    if (!moved) return response;
+    this.endpoint = moved;
+    return post(moved);
   }
 
   // The newest queued records, sealed, within the crash budget; they leave the queue.
@@ -314,7 +331,7 @@ export class CloudTransport extends BatchTransport {
   // Posts from a child process and waits for it: the only way to send over the network
   // synchronously. The secret travels on stdin, never on the command line.
   _sendNow(body) {
-    const input = JSON.stringify({ url: this.endpoint, headers: this._headers(), body });
+    const input = JSON.stringify({ url: this.endpoint, headers: this._headers(), body, follow: followRule(this.endpoint) });
     const env = process.platform === 'win32' && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {};
     const result = spawnSync(process.execPath, ['-e', SENDER], {
       input,
@@ -394,4 +411,40 @@ function listFor(record) {
   if (record instanceof JobRunRecord) return 'jobs';
   if (record instanceof LogRecord) return 'logs';
   return 'events';
+}
+
+/**
+ * Where a 307 or 308 answer from PeekInside Cloud moves its endpoint, when the API key may follow
+ * it there, or null. Hosting often sends a site's bare domain to its www name, or back (Vercel
+ * does by default), and fetch() drops the Authorization header on such a redirect, so it is
+ * followed by hand, and only to the same path on the same host or its www twin, never downgrading
+ * https. Anywhere else, the answer stands (and the batch is retried later).
+ *
+ * @param {Response} response
+ * @param {string} from - The URL that answered
+ * @returns {string|null}
+ */
+export function redirectTarget(response, from) {
+  if (response.status !== 307 && response.status !== 308) return null;
+  const location = response.headers.get('location');
+  if (!location) return null;
+  let target;
+  try {
+    target = new URL(location, from);
+  } catch (error) {
+    return null;
+  }
+  const rule = followRule(from);
+  const ok = rule.hosts.includes(target.hostname) && rule.protocols.includes(target.protocol) && target.pathname === rule.path && (target.port === '' || target.port === rule.port);
+  return ok ? target.href : null;
+}
+
+// What redirectTarget accepts, as data, so the crash sender's child process applies the same rule.
+function followRule(from) {
+  const url = new URL(from);
+  const host = url.hostname;
+  const named = host.includes('.') && !host.startsWith('[') && !/^[\d.]+$/.test(host) && host !== 'localhost' && !host.endsWith('.localhost');
+  const hosts = [host];
+  if (named) hosts.push(host.startsWith('www.') ? host.slice(4) : `www.${host}`);
+  return { hosts, protocols: url.protocol === 'http:' ? ['http:', 'https:'] : [url.protocol], path: url.pathname, port: url.port };
 }
