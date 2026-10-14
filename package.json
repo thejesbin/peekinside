@@ -1,39 +1,79 @@
 {
-  "name": "flux-manager",
-  "version": "1.0.6",
-  "description": "A comprehensive Node.js application management and debugging platform for the Flux.js ecosystem",
+  "name": "peekinside",
+  "version": "1.2.0",
+  "description": "Debug Node.js from the inside: errors with the requests, queries, logs and jobs behind them. A free local dashboard, and encrypted monitoring for production",
   "main": "index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "peekinside": "bin/peekinside.js"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "src/",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "demo": "node examples/demo.js",
+    "test": "node --test",
+    "test:types": "tsc -p test-d && tsc -p test-d/tsconfig.bundler.json && tsc -p test-d/tsconfig.cjs.json",
+    "prepublishOnly": "npm test && npm run test:types"
   },
   "keywords": [
-    "flux-manager",
-    "flux-js",
+    "peekinside",
+    "http",
+    "inspector",
     "debugging",
     "monitoring",
-    "management",
-    "http",
+    "observability",
     "express",
+    "koa",
+    "fastify",
     "middleware",
-    "devops",
     "nodejs"
   ],
   "author": "Jesbin",
   "license": "MIT",
-  "dependencies": {
-    "ws": "8.14.2",
-    "uuid": "9.0.1"
-  },
   "engines": {
-    "node": ">=14.0.0"
+    "node": ">=18"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thejesbin/flux-manager.git"
+    "url": "git+https://github.com/thejesbin/peekinside.git"
   },
   "bugs": {
-    "url": "https://github.com/thejesbin/flux-manager/issues"
+    "url": "https://github.com/thejesbin/peekinside/issues",
+    "email": "support@peekinside.dev"
   },
-  "homepage": "https://github.com/thejesbin/flux-manager#readme"
+  "homepage": "https://peekinside.dev",
+  "devDependencies": {
+    "@types/express": "4.17.25",
+    "@types/koa": "2.15.0",
+    "@types/node": "24.10.1",
+    "bullmq": "6.3.14",
+    "cron": "4.4.0",
+    "express": "4.22.3",
+    "express5": "npm:express@5.1.0",
+    "fastify": "5.12.5",
+    "koa": "2.16.4",
+    "mongodb": "6.21.0",
+    "mongodb-memory-server-core": "11.3.0",
+    "mongoose": "8.24.5",
+    "mysql2": "3.24.5",
+    "node-cron": "4.6.0",
+    "pg": "8.23.1",
+    "pino": "10.4.0",
+    "typescript": "5.9.3",
+    "winston": "3.19.0"
+  }
 }
