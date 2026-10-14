@@ -19,6 +19,15 @@ import { RequestRecord } from '../record.js';
 
 // A destination that stays down must not flood the app's logs.
 const WARNING_INTERVAL_MS = 60_000;
+// While the destination is down, the queue is bounded by size as well as by number: a backlog of
+// heavy requests (large bodies, long timelines) never holds more memory than this.
+const MAX_QUEUE_BYTES = 32 * 1024 * 1024;
+// Sizes are measured only once this many records wait (the most that can pass 32 MB unmeasured is
+// this many of the largest records), so normal sending rarely measures anything.
+const MEASURE_FROM = 50;
+// A record whose size can't be measured counts as this much.
+const UNKNOWN_SIZE = 16 * 1024;
+const sizes = new WeakMap();
 // Process samples kept while the destination is down: the newest win.
 const MAX_SAMPLES = 60;
 
@@ -314,11 +323,34 @@ export class BatchTransport {
     }
   }
 
-  // Drops the oldest records beyond maxQueue.
+  // Drops the oldest records beyond maxQueue, and beyond MAX_QUEUE_BYTES once a backlog builds.
   _trimQueue() {
     if (this.queue.length > this.maxQueue) {
       this.dropped += this.queue.length - this.maxQueue;
       this.queue.splice(0, this.queue.length - this.maxQueue);
     }
+    if (this.queue.length <= MEASURE_FROM) return;
+    let total = 0;
+    for (const record of this.queue) total += sizeOf(record);
+    let drop = 0;
+    while (total > MAX_QUEUE_BYTES && drop < this.queue.length - 1) total -= sizeOf(this.queue[drop++]);
+    if (drop) {
+      this.dropped += drop;
+      this.queue.splice(0, drop);
+    }
   }
+}
+
+// About how much memory a queued record holds: its JSON size, measured once.
+function sizeOf(record) {
+  let size = sizes.get(record);
+  if (size === undefined) {
+    try {
+      size = Buffer.byteLength(JSON.stringify(record));
+    } catch (error) {
+      size = UNKNOWN_SIZE;
+    }
+    sizes.set(record, size);
+  }
+  return size;
 }

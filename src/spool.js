@@ -20,6 +20,10 @@ import path from 'path';
 export const CLOUD_FOLDER = 'cloud';
 // A temporary file this old was left by a writer that died mid-write.
 const STALE_TEMP_MS = 60_000;
+// Most files, and bytes, one folder keeps: past either, the oldest files go. An app that crashes
+// in a loop while its destination is down can't fill the disk.
+const MAX_FILES = 100;
+const MAX_BYTES = 50 * 1024 * 1024;
 
 /**
  * One spool folder.
@@ -76,7 +80,29 @@ export class Spool {
     const temp = `${file}.${process.pid}.tmp`;
     fs.writeFileSync(temp, JSON.stringify(content), { mode: 0o600 });
     fs.renameSync(temp, file);
+    this._prune(name);
     return name;
+  }
+
+  // Deletes the oldest waiting files beyond MAX_FILES or MAX_BYTES, never the one just written.
+  _prune(keep) {
+    try {
+      const files = [];
+      for (const name of fs.readdirSync(this.dir)) {
+        if (!name.endsWith('.json')) continue;
+        const stat = fs.statSync(path.join(this.dir, name));
+        files.push({ name, at: stat.mtimeMs, size: stat.size });
+      }
+      if (files.length <= MAX_FILES && files.reduce((total, file) => total + file.size, 0) <= MAX_BYTES) return;
+      files.sort((a, b) => (a.name === keep ? -1 : b.name === keep ? 1 : b.at - a.at));
+      let total = 0;
+      files.forEach((file, index) => {
+        total += file.size;
+        if (file.name !== keep && (index >= MAX_FILES || total > MAX_BYTES)) fs.rmSync(path.join(this.dir, file.name), { force: true });
+      });
+    } catch (error) {
+      // Pruning is housekeeping: a folder that can't be read is left as it is.
+    }
   }
 
   /**

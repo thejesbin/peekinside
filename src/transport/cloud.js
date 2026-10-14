@@ -26,6 +26,9 @@ const FLUSH_INTERVAL_MS = 1000;
 const BATCH_SIZE = 100;
 const MAX_QUEUE = 2000;
 const REQUEST_TIMEOUT_MS = 10_000;
+// When the event loop empties (a script ending), the last batch waits at most this long; what
+// doesn't go is spooled for the next run instead.
+const EXIT_TIMEOUT_MS = 2500;
 // Sealed JSON per POST: records that don't fit wait for the next POST. PeekInside Cloud refuses
 // bodies over 8 MB, and serverless hosts such as Vercel stop requests at 4.5 MB before they reach it.
 const MAX_POST_BYTES = 4 * 1024 * 1024;
@@ -98,7 +101,13 @@ export class CloudTransport extends BatchTransport {
     // Never keeps the process alive on its own, and never runs as part of a request.
     this.timer = RequestContext.outside(() => setInterval(() => this.flush(), FLUSH_INTERVAL_MS));
     if (typeof this.timer.unref === 'function') this.timer.unref();
-    // One more batch when the event loop empties, for scripts that end without calling flush().
+    // One more batch when the event loop empties, for scripts that end without calling flush():
+    // briefly, so a slow or unreachable PeekInside Cloud never holds the script up for long.
+    this.exiting = false;
+    this._onBeforeExit = () => {
+      this.exiting = true;
+      return this.flush();
+    };
     process.once('beforeExit', this._onBeforeExit);
 
     this._resendTimer = null;
@@ -235,8 +244,33 @@ export class CloudTransport extends BatchTransport {
     throw new Error(reason);
   }
 
+  // Ending while waiting to retry after a failure: what's queued is spooled rather than lost.
+  _onBackingOff() {
+    if (this.exiting) this._spoolQueue();
+  }
+
   _onRetry(error) {
+    if (this.exiting) {
+      // The script is ending: what's queued waits on disk for the next run.
+      this._spoolQueue();
+      return;
+    }
     this._warn(`Could not reach PeekInside Cloud (${error && error.message}). Retrying in ${Math.round(this.backoff / 1000)} s.`);
+  }
+
+  // Seals the newest queued records (within the crash budget) and spools them, synchronously.
+  _spoolQueue() {
+    try {
+      const taken = this._takeNewest(SyncSealer.create(this.apiKey.publicKey, 'event'), MAX_QUEUE);
+      if (!taken.length) return;
+      const body = { events: [], exceptions: [] };
+      for (const { record, payload } of taken) (body[listFor(record)] ??= []).push(payload);
+      Spool.cloud(settings.dataDir(), this.apiKey.projectId).write({ createdAt: Date.now(), body });
+      // Sent by the next run; or by this one, should it keep running after all.
+      this._scheduleResend(SPOOL_RESEND_DELAY_MS);
+    } catch (error) {
+      // A data folder that can't be written loses the records, never the app.
+    }
   }
 
   // An invalid key or an inactive plan loses every request from now on: an error, not a warning.
@@ -258,7 +292,7 @@ export class CloudTransport extends BatchTransport {
       method: 'POST',
       headers: this._headers(),
       body,
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
+      signal: AbortSignal.timeout(this.exiting ? EXIT_TIMEOUT_MS : REQUEST_TIMEOUT_MS)
     });
   }
 
