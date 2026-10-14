@@ -163,7 +163,14 @@ test('serves the dashboard shell with a strict policy', async () => {
   const page = await request('GET', '/');
   assert.equal(page.status, 200);
   const csp = page.headers['content-security-policy'];
-  assert.match(csp, /script-src 'nonce-[A-Za-z0-9+/=]+' https:\/\/peekinside\.example/);
+  // The site and its www twin: hosting that redirects one to the other still loads the interface.
+  assert.match(csp, /script-src 'nonce-[A-Za-z0-9+/=]+' https:\/\/peekinside\.example https:\/\/www\.peekinside\.example;/);
+  assert.match(csp, /style-src https:\/\/peekinside\.example https:\/\/www\.peekinside\.example 'unsafe-inline'/);
+  assert.match(csp, /font-src https:\/\/peekinside\.example https:\/\/www\.peekinside\.example;/);
+  // When the interface can't load, the page says so instead of "Loading" forever.
+  assert.match(page.text, /<div class="boot boot-loading">/);
+  assert.match(page.text, /<div class="boot boot-failed" hidden>.*Check that this computer can reach peekinside\.example/s);
+  assert.match(page.text, /<script nonce="[^"]+">\(function\(\)\{var shown=false/);
   assert.match(csp, /connect-src 'self'/);
   assert.match(csp, /frame-ancestors 'none'/);
   assert.match(page.text, /<script src="https:\/\/peekinside\.example\/local\/v1\/app\.js" defer><\/script>/);
@@ -183,6 +190,25 @@ test('serves the dashboard shell with a strict policy', async () => {
   assert.equal((await request('GET', '/brand/other.svg')).status, 404);
   assert.equal((await request('GET', '/secret.txt')).status, 404);
   assert.equal((await request('POST', '/')).status, 405);
+});
+
+test('a local site has no www twin in the policy', async () => {
+  const localPort = await freePort();
+  const store = new Store(dataDir).load();
+  const local = new HubServer({ store, port: localPort, siteUrl: 'http://localhost:4000', version: 'test', dataDir }).httpServer;
+  await new Promise((resolve) => local.listen(localPort, '127.0.0.1', resolve));
+  try {
+    const csp = await new Promise((resolve, reject) => {
+      http.get({ host: '127.0.0.1', port: localPort, path: '/', headers: { host: `localhost:${localPort}` } }, (res) => {
+        res.resume();
+        resolve(res.headers['content-security-policy']);
+      }).on('error', reject);
+    });
+    assert.match(csp, /script-src 'nonce-[A-Za-z0-9+/=]+' http:\/\/localhost:4000;/);
+    assert.doesNotMatch(csp, /www\./);
+  } finally {
+    local.close();
+  }
 });
 
 test('status identifies the hub', async () => {

@@ -57,6 +57,11 @@ const BASE_HEADERS = {
   'Cross-Origin-Resource-Policy': 'same-origin'
 };
 
+// If the interface doesn't arrive (blocked, offline, or still missing after 20 seconds), says so
+// instead of "Loading" forever. The app replaces the loading message when it starts, so the timer
+// finds nothing to replace then.
+const BOOT_WATCH = '(function(){var shown=false;function show(){if(shown)return;var loading=document.querySelector(".boot-loading"),failed=document.querySelector(".boot-failed");if(!loading||!failed)return;shown=true;loading.hidden=true;failed.hidden=false}function broken(){if(document.readyState==="loading")document.addEventListener("DOMContentLoaded",show);else show()}document.addEventListener("securitypolicyviolation",function(e){if(/^(script|style)-src/.test(e.effectiveDirective||e.violatedDirective||""))broken()});window.addEventListener("error",function(e){var t=e.target;if(t&&t.tagName==="SCRIPT"&&/\\/app\\.js$/.test(t.src||""))broken()},true);setTimeout(function(){if(document.querySelector(".boot-loading"))broken()},20000)})()';
+
 // Applies the saved theme before first paint (same as the PeekInside site).
 const THEME_SCRIPT = '(function(){try{var t=localStorage.getItem("peekinside:theme");if(t!=="light"&&t!=="dark"){t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark"}document.documentElement.setAttribute("data-theme",t)}catch(e){document.documentElement.setAttribute("data-theme","dark")}})()';
 
@@ -408,19 +413,20 @@ export class HubServer {
   }
 
   // The dashboard page: a shell that loads the interface from the PeekInside site. The Content
-  // Security Policy allows scripts only from that site (and the inline theme script, by nonce),
-  // and lets the page fetch data only from this server.
+  // Security Policy allows scripts only from that site (and the inline scripts, by nonce), and
+  // lets the page fetch data only from this server.
   _shell(req, res) {
     const assets = this._assets;
     const siteUrl = this.siteUrl;
+    const host = new URL(siteUrl).host;
     const nonce = randomBytes(16).toString('base64');
-    const assetOrigin = new URL(assets).origin;
+    const assetOrigins = siteOrigins(assets);
     const csp = [
       "default-src 'none'",
-      `script-src 'nonce-${nonce}' ${assetOrigin}`,
-      `style-src ${assetOrigin} 'unsafe-inline'`,
+      `script-src 'nonce-${nonce}' ${assetOrigins}`,
+      `style-src ${assetOrigins} 'unsafe-inline'`,
       "img-src 'self' data:",
-      `font-src ${assetOrigin}`,
+      `font-src ${assetOrigins}`,
       "connect-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
@@ -436,12 +442,13 @@ export class HubServer {
 <title>PeekInside Local</title>
 <link rel="icon" href="/brand/peekinside-span-core-mark-light.svg" type="image/svg+xml" media="(prefers-color-scheme: light)">
 <link rel="icon" href="/brand/peekinside-span-core-mark-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)">
+<script nonce="${nonce}">${BOOT_WATCH}</script>
 <link rel="stylesheet" href="${escapeHtml(assets)}/app.css">
 <script nonce="${nonce}">${THEME_SCRIPT}</script>
-<style>.boot{font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;max-width:440px;margin:18vh auto 0;padding:0 16px;opacity:.75}.boot a{color:inherit}</style>
+<style>.boot{font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;max-width:440px;margin:18vh auto 0;padding:0 16px;opacity:.75}.boot a{color:inherit}.boot[hidden]{display:none}.boot-failed{opacity:.9}</style>
 </head>
 <body>
-<div id="root"><div class="boot"><p><strong>Loading PeekInside…</strong></p><p>The dashboard interface loads from <a href="${escapeHtml(siteUrl)}">${escapeHtml(new URL(siteUrl).host)}</a>. Your requests stay on this machine.</p></div></div>
+<div id="root"><div class="boot boot-loading"><p><strong>Loading PeekInside…</strong></p><p>The dashboard interface loads from <a href="${escapeHtml(siteUrl)}">${escapeHtml(host)}</a>. Your requests stay on this machine.</p></div><div class="boot boot-failed" hidden><p><strong>The dashboard didn’t load</strong></p><p>Its interface comes from <a href="${escapeHtml(siteUrl)}">${escapeHtml(host)}</a>, and this browser couldn’t load it. Check that this computer can reach ${escapeHtml(host)}: a firewall, VPN, proxy or ad blocker can block it. Then <a href="">reload this page</a>.</p><p>Your app keeps recording meanwhile, so nothing is lost.</p></div></div>
 <script src="${escapeHtml(assets)}/app.js" defer></script>
 </body>
 </html>
@@ -452,6 +459,22 @@ export class HubServer {
       'Content-Security-Policy': csp
     }, req.method === 'HEAD');
   }
+}
+
+// The site's origin and its www twin: hosting often redirects one to the other (Vercel sends the
+// bare domain to www by default), and a Content Security Policy also checks where a redirect
+// lands. Local addresses (localhost, IPs) have no twin.
+function siteOrigins(siteUrl) {
+  const url = new URL(siteUrl);
+  const host = url.hostname;
+  const origins = [url.origin];
+  const named = host.includes('.') && !host.startsWith('[') && !/^[\d.]+$/.test(host) && host !== 'localhost' && !host.endsWith('.localhost');
+  if (named) {
+    const twin = new URL(url.origin);
+    twin.hostname = host.startsWith('www.') ? host.slice(4) : `www.${host}`;
+    origins.push(twin.origin);
+  }
+  return origins.join(' ');
 }
 
 function isRead(req) {
