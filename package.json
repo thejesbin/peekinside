@@ -1,6 +1,6 @@
 {
   "name": "peekinside",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Debug Node.js from the inside: errors with the requests, queries, logs and jobs behind them. A free local dashboard, and encrypted monitoring for production",
   "main": "index.js",
   "types": "./index.d.ts",
