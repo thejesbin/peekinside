@@ -70,6 +70,9 @@ export class Cli {
    * @throws {Error} When the hub did not start in time
    */
   async start(openBrowser) {
+    // A hub left running by an older PeekInside is replaced by this version's (its data stays).
+    const replaced = await this.hub.replaceIfOlder();
+    if (replaced) console.log(`Restarted PeekInside Local: it was version ${replaced}, now ${VERSION}.`);
     let running = await this.hub.status();
     if (!running) {
       this.hub.spawn();

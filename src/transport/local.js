@@ -79,6 +79,7 @@ export class LocalTransport extends BatchTransport {
     this.blocked = new BlockedRequests();
     this.blockedWarnings = new Set();
     this.outdatedHubNoted = false;
+    this.hubVersionChecked = false;
   }
 
   /**
@@ -198,6 +199,12 @@ export class LocalTransport extends BatchTransport {
   // Sends the batch with the blocked-request counts gathered since the last batch. Records are
   // dropped only when the hub refuses them; when it isn't reachable, both are kept for later.
   async _deliver(batch) {
+    // Once per process: a hub left running by an older PeekInside is replaced by this version's.
+    if (!this.hubVersionChecked) {
+      this.hubVersionChecked = true;
+      const replaced = await this.hub.replaceIfOlder().catch(() => null);
+      if (replaced) console.log(`${LOG_PREFIX} Restarted the local dashboard: it was PeekInside ${replaced}, and this app uses ${VERSION}.`);
+    }
     const blocked = this.blocked.take();
     const samples = this.takeSamples();
     const { requests, exceptions, jobs, logs } = BatchTransport.split(batch);

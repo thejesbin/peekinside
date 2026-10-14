@@ -9,7 +9,7 @@ import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { HUB_APP_ID, VERSION, settings } from '../config.js';
+import { HUB_API_VERSION, HUB_APP_ID, VERSION, settings } from '../config.js';
 
 const HUB_ENTRY = fileURLToPath(new URL('./entry.js', import.meta.url));
 
@@ -154,6 +154,50 @@ export class HubClient {
   }
 
   /**
+   * Replaces a running hub from an older PeekInside with this version's. Hubs outlive the apps
+   * that start them, so after an upgrade the old one would keep serving, its dashboard page
+   * included. Only a hub with the same API and data folder is replaced, so its data stays, and
+   * only the process hub.json names, so nothing else listening on the port is ever stopped.
+   *
+   * @returns {Promise<string|null>} The version that was replaced, or null when none was
+   */
+  async replaceIfOlder() {
+    const running = await this.status().catch(() => null);
+    const dataDir = settings.dataDir();
+    if (!HubClient.shouldReplace(running, { version: VERSION, dataDir, infoPid: readInfoPid(dataDir) })) return null;
+    try {
+      process.kill(running.pid, 'SIGTERM');
+    } catch (error) {
+      return null;
+    }
+    for (let attempt = 0; attempt < 50; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (!(await this.status().catch(() => null))) {
+        this.spawn();
+        await this.waitUntilReady(8000).catch(() => null);
+        return running.version;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Whether a running hub is an older version than this one that may be replaced: same API, same
+   * data folder, and the process its hub.json names.
+   *
+   * @param {Object|null} running - Its GET /api/status
+   * @param {{ version: string, dataDir: string, infoPid: number|null }} self - This version, its
+   *   data folder, and the pid in that folder's hub.json
+   * @returns {boolean}
+   */
+  static shouldReplace(running, { version, dataDir, infoPid }) {
+    if (!running || running.apiVersion !== HUB_API_VERSION) return false;
+    if (!Number.isInteger(running.pid) || running.pid !== infoPid || running.pid === process.pid) return false;
+    if (typeof running.dataDir !== 'string' || path.resolve(running.dataDir) !== path.resolve(dataDir)) return false;
+    return compareVersions(running.version, version) < 0;
+  }
+
+  /**
    * Waits until the hub answers.
    *
    * @param {number} [timeout=5000] - Milliseconds to wait
@@ -181,4 +225,35 @@ export class HubClient {
   close() {
     if (this.agent) this.agent.destroy();
   }
+}
+
+// The pid in the data folder's hub.json (written by the hub that runs), or null.
+function readInfoPid(dataDir) {
+  try {
+    const info = JSON.parse(fs.readFileSync(path.join(dataDir, 'hub.json'), 'utf8'));
+    return Number.isInteger(info.pid) ? info.pid : null;
+  } catch (error) {
+    return null;
+  }
+}
+
+/**
+ * Compares two versions by major, minor and patch ("1.10.0" is after "1.9.3"). Anything after the
+ * patch number (a prerelease) is ignored, and versions that can't be read compare as equal, so
+ * nothing is replaced on a guess.
+ *
+ * @param {string} a
+ * @param {string} b
+ * @returns {number} Negative when a is older, positive when newer, 0 otherwise
+ */
+export function compareVersions(a, b) {
+  const parse = (value) => /^(\d+)\.(\d+)\.(\d+)/.exec(String(value || ''));
+  const left = parse(a);
+  const right = parse(b);
+  if (!left || !right) return 0;
+  for (let index = 1; index <= 3; index++) {
+    const difference = Number(left[index]) - Number(right[index]);
+    if (difference) return difference;
+  }
+  return 0;
 }
