@@ -9,12 +9,14 @@
 const MAX_ID = 128;
 const MAX_EMAIL = 254;
 const MAX_NAME = 128;
+const MAX_PHONE = 32;
 
 /**
  * @typedef {Object} User
  * @property {string|null} id
  * @property {string|null} email
  * @property {string|null} name
+ * @property {string|null} phone
  */
 
 /**
@@ -22,14 +24,15 @@ const MAX_NAME = 128;
  */
 export class UserInfo {
   /**
-   * Accepts `{ id, email, name }` (also `_id`, `userId` and `username`, as user objects of common
-   * libraries have them), or just an id. Anything else is no user.
+   * Accepts `{ id, email, name, phone }` (also `_id`, `userId`, `username`, `phoneNumber`,
+   * `phone_number` and `mobile`, as user objects of common libraries and apps have them), or just
+   * an id. Anything else is no user.
    *
    * @param {*} user
    * @returns {User|null} null when it names nobody
    *
    * @example
-   * UserInfo.normalize({ id: 42, email: 'ada@example.com' }) // { id: '42', email: 'ada@example.com', name: null }
+   * UserInfo.normalize({ id: 42, phone: '+91 98765 43210' }) // { id: '42', email: null, name: null, phone: '+91 98765 43210' }
    */
   static normalize(user) {
     if (user === null || user === undefined) return null;
@@ -37,25 +40,27 @@ export class UserInfo {
     let id;
     let email;
     let name;
+    let phone;
     try {
       id = firstDefined(user.id, user._id, user.userId);
       email = user.email;
       name = firstDefined(user.name, user.username);
+      phone = firstDefined(user.phone, user.phoneNumber, user.phone_number, user.mobile);
     } catch (error) {
       return null;
     }
-    const clean = { id: identifier(id), email: label(email, MAX_EMAIL), name: label(name, MAX_NAME) };
-    return clean.id || clean.email || clean.name ? clean : null;
+    const clean = { id: identifier(id), email: label(email, MAX_EMAIL), name: label(name, MAX_NAME), phone: phoneNumber(phone) };
+    return clean.id || clean.email || clean.name || clean.phone ? clean : null;
   }
 
   /**
-   * One string that tells users apart: the id, else the email, else the name.
+   * One string that tells users apart: the id, else the email, else the phone, else the name.
    *
    * @param {User|null} user
    * @returns {string|null}
    */
   static key(user) {
-    return user ? user.id || user.email || user.name || null : null;
+    return user ? user.id || user.email || user.phone || user.name || null : null;
   }
 }
 
@@ -74,6 +79,12 @@ function identifier(value) {
     }
   }
   return null;
+}
+
+// As the app wrote it ("+91 98765 43210"); numbers (and bigints) as their digits.
+function phoneNumber(value) {
+  if (typeof value === 'number' || typeof value === 'bigint') return label(String(value), MAX_PHONE);
+  return label(value, MAX_PHONE);
 }
 
 function label(value, max) {

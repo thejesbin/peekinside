@@ -223,7 +223,8 @@ test('cloud mode seals exceptions into the same batches as requests', async () =
     const [event] = batch.body.events;
     const [sealedException] = batch.body.exceptions;
     assert.equal(event.exceptionCount, 1, 'a plain column, for lists');
-    assert.deepEqual(Object.keys(sealedException), ['id', 'occurredAt', 'environment', 'release', 'handled', 'fatal', 'requestId', 'jobRunId', 'summary', 'detail']);
+    assert.deepEqual(Object.keys(sealedException), ['id', 'occurredAt', 'environment', 'release', 'handled', 'fatal', 'requestId', 'jobRunId', 'fingerprint', 'summary', 'detail']);
+    assert.match(sealedException.fingerprint, /^[0-9a-f]{16}$/, 'the fingerprint, for alerts on new errors: a hash, not the error');
     assert.equal(sealedException.requestId, event.id);
     assert.equal(sealedException.environment, 'production');
     assert.match(sealedException.summary, /^v1\./);
@@ -231,6 +232,7 @@ test('cloud mode seals exceptions into the same batches as requests', async () =
 
     const exception = await openException(sealedException);
     assert.equal(exception.summary.message, 'order 42 failed');
+    assert.equal(sealedException.fingerprint, exception.summary.fingerprint, 'the same one the dashboard groups by');
     assert.equal(exception.summary.mechanism, 'express');
     assert.deepEqual(exception.summary.request, { method: 'GET', path: '/orders/42' });
     assert.equal(exception.detail.request.id, event.id);

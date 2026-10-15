@@ -15,6 +15,7 @@ import { Store } from '../src/hub/store.js';
 import { IngestPayload } from '../src/hub/ingest-payload.js';
 import { LoopMonitor } from '../src/runtime/loop-monitor.js';
 import { RuntimeSampler } from '../src/runtime/sampler.js';
+import { RequestCounter } from '../src/runtime/request-counter.js';
 import { Timeline, TimelineSettings } from '../src/timeline/timeline.js';
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -114,7 +115,14 @@ test('samples: memory, CPU and the event-loop delay since the last sample', asyn
     blockFor(70);
     await pause(30);
     const sample = sampler.take();
-    assert.deepEqual(Object.keys(sample), ['at', 'rss', 'heapUsed', 'heapTotal', 'external', 'cpu', 'loopP50', 'loopP99', 'loopMax']);
+    assert.deepEqual(Object.keys(sample), [
+      'at', 'rss', 'heapUsed', 'heapTotal', 'external', 'cpu', 'loopP50', 'loopP99', 'loopMax',
+      'arrayBuffers', 'heapLimit', 'elu', 'gcCount', 'gcMs', 'gcMax', 'handles', 'requests', 'inFlight'
+    ]);
+    assert.ok(sample.heapLimit > sample.heapUsed, 'the heap has room to grow');
+    assert.ok(sample.elu > 0 && sample.elu <= 100, `a busy loop shows (${sample.elu}%)`);
+    assert.ok(sample.handles === null || sample.handles >= 0);
+    assert.equal(sample.requests, null, 'no counter, no request numbers');
     assert.equal(samples.length, 1);
     assert.ok(sample.heapUsed > 0 && sample.rss >= sample.heapUsed);
     assert.ok(sample.cpu > 0, 'busy time shows as CPU');
@@ -122,6 +130,29 @@ test('samples: memory, CPU and the event-loop delay since the last sample', asyn
     assert.ok(sample.loopP50 <= sample.loopP99 && sample.loopP99 <= sample.loopMax);
   } finally {
     LoopMonitor.release();
+  }
+});
+
+test('samples count garbage collections and the requests served', async () => {
+  const requests = new RequestCounter();
+  const sampler = new RuntimeSampler({ intervalMs: 60_000, monitor: null, requests, onSample: () => {} }).start();
+  try {
+    // Short-lived objects, enough for the young generation to be collected a few times.
+    let kept = 0;
+    for (let i = 0; i < 400_000; i++) kept += [{ i, text: `item ${i}` }].length;
+    assert.equal(kept, 400_000);
+    await pause(60);
+    requests.started();
+    requests.started();
+    requests.ended();
+    const sample = sampler.take();
+    assert.ok(sample.gcCount > 0, `collections are counted (${sample.gcCount})`);
+    assert.ok(sample.gcMs > 0 && sample.gcMax <= sample.gcMs, `${sample.gcMs} ms in all, ${sample.gcMax} ms at most`);
+    assert.equal(sample.requests, 1, 'the request that finished');
+    assert.equal(sample.inFlight, 1, 'the one still open');
+    assert.equal(sampler.take().requests, 0, 'each request counts once');
+  } finally {
+    sampler.stop();
   }
 });
 
@@ -191,6 +222,8 @@ test('end to end: a request that blocks the loop, the one waiting beside it, and
     const [process] = result.runtime.processes;
     assert.equal(process.pid, globalThis.process.pid);
     assert.ok(process.samples[0].heapUsed > 0);
+    assert.equal(process.samples[0].requests, 2, 'the sample counts the requests the process served');
+    assert.ok(process.samples[0].heapLimit > 0 && process.samples[0].elu > 0);
   } finally {
     peekInside.stop();
     server.close();

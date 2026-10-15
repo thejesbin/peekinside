@@ -8,7 +8,7 @@ const release: string | null = peek.release;
 void release;
 app.use(peek.expressMiddleware());
 app.use((req, res, next) => {
-  const attached: boolean = PeekInside.setUser({ id: 42, email: "ada@example.com" });
+  const attached: boolean = PeekInside.setUser({ id: 42, email: "ada@example.com", name: "Ada", phone: "+91 98765 43210" });
   const sent: Promise<number> = PeekInside.job("send-invoices", async () => 3, { schedule: "0 * * * *", data: { batch: 1 } });
   const count: number = peek.job("count", () => 1);
   void sent;

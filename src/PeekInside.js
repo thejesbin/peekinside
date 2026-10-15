@@ -42,6 +42,7 @@ import { JobRunner } from './jobs/job-runner.js';
 import { LogCapture } from './logs/log-capture.js';
 import { LoopMonitor } from './runtime/loop-monitor.js';
 import { RuntimeSampler } from './runtime/sampler.js';
+import { RequestCounter } from './runtime/request-counter.js';
 import { UserInfo } from './user.js';
 import { CloudTransport } from './transport/cloud.js';
 import { LocalTransport } from './transport/local.js';
@@ -159,6 +160,8 @@ class PeekInside {
     // Whether this instance uses the event-loop monitor, and its process sampler.
     this._loopMonitor = false;
     this._sampler = null;
+    // The requests this instance serves, counted for its process samples.
+    this._requests = null;
     // Log lines for the Logs page, and job runs.
     this._logs = null;
     this._jobs = null;
@@ -218,9 +221,11 @@ class PeekInside {
       }
       if (this.options.runtime !== false) {
         const transport = this._transport;
+        this._requests = new RequestCounter();
         this._sampler = new RuntimeSampler({
           intervalMs: this._cloud ? 60_000 : 10_000,
           monitor: LoopMonitor.shared,
+          requests: this._requests,
           onSample: (sample) => transport.addSample(sample)
         }).start();
       }
@@ -427,13 +432,14 @@ class PeekInside {
    * customer ran into. In PeekInside Cloud the user is encrypted with the rest of the request.
    * Call it once the user is known, such as in your authentication middleware.
    *
-   * @param {{ id?: string|number, email?: string, name?: string }|string|number|null} user - The
-   *   user, or just their id; null forgets it
+   * @param {{ id?: string|number, email?: string, name?: string, phone?: string|number }|string|number|null} user -
+   *   The user, or just their id; null forgets it. The phone is kept as written (phoneNumber,
+   *   phone_number and mobile work too).
    * @returns {boolean} Whether a request was running to attach it to
    *
    * @example
    * app.use((req, res, next) => {
-   *   if (req.user) PeekInside.setUser({ id: req.user.id, email: req.user.email });
+   *   if (req.user) PeekInside.setUser({ id: req.user.id, email: req.user.email, name: req.user.name, phone: req.user.phone });
    *   next();
    * });
    */
@@ -683,6 +689,7 @@ class PeekInside {
 
   _track(req, res, target, integration) {
     let context = null;
+    const requests = this._requests;
     const recorder = new ExchangeRecorder(req, res, target, {
       maxBodySize: () => this.options.maxBodySize,
       onExchange: (exchange) => {
@@ -698,6 +705,19 @@ class PeekInside {
     });
     context = new RequestContext({ capture: this._exceptions, req, recorder, target, integration });
     recorder.start();
+    if (requests) {
+      // Counted off the response itself, so a request ends once whatever happens to its record.
+      requests.started();
+      let open = true;
+      const end = () => {
+        if (open) {
+          open = false;
+          requests.ended();
+        }
+      };
+      res.once('finish', end);
+      res.once('close', end);
+    }
     if (this._timeline) {
       context.timeline = new Timeline(this._timeline, recorder.perfStart);
     }
