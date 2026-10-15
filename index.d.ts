@@ -208,6 +208,8 @@ export interface PeekInsideUser {
   id?: string | number;
   email?: string;
   name?: string;
+  /** As your app writes it, such as "+91 98765 43210". */
+  phone?: string | number;
 }
 
 /** Options that can still change after the instance is created (see `attachTo`). */
@@ -315,7 +317,7 @@ declare class PeekInside {
    *
    * @example
    * app.use((req, res, next) => {
-   *   if (req.user) PeekInside.setUser({ id: req.user.id, email: req.user.email });
+   *   if (req.user) PeekInside.setUser({ id: req.user.id, email: req.user.email, name: req.user.name, phone: req.user.phone });
    *   next();
    * });
    */

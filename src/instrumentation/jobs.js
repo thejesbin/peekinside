@@ -4,6 +4,9 @@
  * (queue workers, with the queue, the attempt and the job's data, and the schedule of repeatable
  * jobs). Each run goes through JobRunner, exactly as PeekInside.job() would run it.
  *
+ * A schedule is recorded with its time zone: the one given to the library, else the process's
+ * own, which is the one these libraries read a cron expression in without one.
+ *
  * Libraries that ship separate CommonJS and ES module builds (node-cron, BullMQ) are patched in
  * both: the CommonJS one right away, the ES module one as soon as it is imported here, which is
  * before any job can run.
@@ -91,7 +94,8 @@ export class JobInstrumentation {
     proto.callProcessJob = function (job) {
       const args = arguments;
       const repeat = job && job.opts && job.opts.repeat;
-      const schedule = repeat ? repeat.pattern || repeat.cron || (Number.isFinite(repeat.every) ? `@every ${repeat.every}ms` : undefined) : undefined;
+      const pattern = repeat ? repeat.pattern || repeat.cron : undefined;
+      const schedule = repeat ? pattern || (Number.isFinite(repeat.every) ? `@every ${repeat.every}ms` : undefined) : undefined;
       return JobRunner.run(
         job && job.name && job.name !== '__default__' ? job.name : this.name,
         () => original.apply(this, args),
@@ -100,7 +104,7 @@ export class JobInstrumentation {
           attempt: job && Number.isInteger(job.attemptsMade) ? job.attemptsMade + 1 : 1,
           data: job ? job.data : undefined,
           schedule,
-          timezone: repeat && typeof repeat.tz === 'string' ? repeat.tz : undefined,
+          timezone: repeat && typeof repeat.tz === 'string' && repeat.tz ? repeat.tz : pattern ? localTimeZone() : undefined,
           trigger: schedule ? 'cron' : 'queue'
         }
       );
@@ -146,7 +150,11 @@ function wrapCronTask(task) {
   const name = task.name && task.name !== task.id ? task.name : `cron ${expression || 'task'}`;
   const wrapped = function () {
     const args = arguments;
-    return JobRunner.run(name, () => original.apply(this, args), { schedule: expression || undefined, timezone: task.timezone, trigger: 'cron' });
+    return JobRunner.run(name, () => original.apply(this, args), {
+      schedule: expression || undefined,
+      timezone: (typeof task.timezone === 'string' && task.timezone) || localTimeZone(),
+      trigger: 'cron'
+    });
   };
   wrapped[kWrapped] = true;
   runner.onMatch = wrapped;
@@ -159,12 +167,21 @@ function wrapCronJobCallback(job, callback) {
     const args = arguments;
     return JobRunner.run(job.name || `cron ${source || 'job'}`, () => callback.apply(this, args), {
       schedule: source || undefined,
-      timezone: job.cronTime && typeof job.cronTime.timeZone === 'string' ? job.cronTime.timeZone : undefined,
+      timezone: (job.cronTime && typeof job.cronTime.timeZone === 'string' && job.cronTime.timeZone) || localTimeZone(),
       trigger: 'cron'
     });
   };
   wrapped[kWrapped] = true;
   return wrapped;
+}
+
+// The process's time zone (TZ, else the system's).
+function localTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+  } catch (error) {
+    return undefined;
+  }
 }
 
 // The file an `import` of the package loads, when it differs from what require() loads.

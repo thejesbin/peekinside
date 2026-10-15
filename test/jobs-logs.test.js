@@ -194,7 +194,11 @@ test('node-cron and cron tasks run as job runs with their schedule', async () =>
     assert.equal(heartbeat.schedule, '* * * * * *');
     assert.equal(heartbeat.trigger, 'cron');
     assert.equal(heartbeat.status, 'ok');
-    assert.equal(result.jobs.find((run) => run.name === 'cleanup').schedule, '* * * * * *');
+    // Without a zone, node-cron runs the schedule in the process's: so it's recorded.
+    assert.equal(heartbeat.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone);
+    const cleanup = result.jobs.find((run) => run.name === 'cleanup');
+    assert.equal(cleanup.schedule, '* * * * * *');
+    assert.ok(cleanup.timezone, 'cron reports the zone it uses');
   } finally {
     task.destroy();
     job.stop();
@@ -222,9 +226,11 @@ test('BullMQ workers: each job a run, with its queue, attempt, data and repeat s
     const worker = new FakeWorker('emails', async (job) => `sent ${job.data.to}`);
     assert.equal(await worker.callProcessJob({ name: 'welcome', data: { to: 'ada@example.test' }, attemptsMade: 1, opts: {} }, 'token'), 'sent ada@example.test');
     await worker.callProcessJob({ name: 'digest', data: {}, attemptsMade: 0, opts: { repeat: { pattern: '0 8 * * 1', tz: 'Europe/Paris' } } });
+    await worker.callProcessJob({ name: 'nightly', data: {}, attemptsMade: 0, opts: { repeat: { pattern: '0 3 * * *' } } });
+    await worker.callProcessJob({ name: 'heartbeat', data: {}, attemptsMade: 0, opts: { repeat: { every: 30000 } } });
 
-    const result = await stored(peekInside, 'queue-api', (state) => state.jobs.length === 2);
-    const [welcome, digest] = result.jobs;
+    const result = await stored(peekInside, 'queue-api', (state) => state.jobs.length === 4);
+    const [welcome, digest, nightly, heartbeat] = result.jobs;
     assert.equal(welcome.name, 'welcome');
     assert.equal(welcome.queue, 'emails');
     assert.equal(welcome.attempt, 2);
@@ -233,6 +239,10 @@ test('BullMQ workers: each job a run, with its queue, attempt, data and repeat s
     assert.equal(digest.schedule, '0 8 * * 1');
     assert.equal(digest.timezone, 'Europe/Paris');
     assert.equal(digest.trigger, 'cron');
+    assert.equal(welcome.timezone, null, 'a job without a schedule has no zone');
+    assert.equal(nightly.timezone, Intl.DateTimeFormat().resolvedOptions().timeZone, 'a pattern without tz runs in the local zone');
+    assert.equal(heartbeat.schedule, '@every 30000ms');
+    assert.equal(heartbeat.timezone, null, 'an interval needs no zone');
   } finally {
     peekInside.stop();
   }

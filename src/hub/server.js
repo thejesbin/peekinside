@@ -1,8 +1,8 @@
 /**
  * The local hub's HTTP server, on 127.0.0.1 only.
  *
- *   GET    /                                   Dashboard page (also /p/<project id>,
- *                                              /p/<project id>/exceptions and /p/<project id>/queries)
+ *   GET    /                                   Dashboard page (also /p/<project id>, and its
+ *                                              /exceptions, /routes, /queries, /logs, /jobs and /runtime)
  *   POST   /api/ingest                         Requests and exceptions from the SDK in each app, and
  *                                              counts of server requests it didn't record (free plan)
  *   GET    /api/status                         Hub version and settings
@@ -48,7 +48,7 @@ const MAX_PAGE = 1000;
 // /api/projects/:id, then optionally a collection and an item.
 const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(?:\/(requests|exceptions|exception-state|runtime|jobs|logs)(?:\/([^/]+))?)?$/;
 // The dashboard page: the project list, a project's requests, its exceptions and its queries.
-const SHELL_ROUTE = /^\/p\/[a-z0-9-]{1,64}(?:\/(?:exceptions|queries|runtime|logs|jobs))?\/?$/;
+const SHELL_ROUTE = /^\/p\/[a-z0-9-]{1,64}(?:\/(?:exceptions|routes|queries|runtime|logs|jobs))?\/?$/;
 
 const BASE_HEADERS = {
   'X-Content-Type-Options': 'nosniff',

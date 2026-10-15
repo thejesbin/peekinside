@@ -62,7 +62,9 @@ export class ExceptionRecord {
 
   /**
    * The sealed form, for PeekInside Cloud: the summary and the detail are encrypted, bound to this
-   * exception's id so they can't be swapped with another record's.
+   * exception's id so they can't be swapped with another record's. The fingerprint (a hash of the
+   * error's name and where it was thrown, see fingerprint.js) goes alongside: it tells Cloud a new
+   * error from a known one, for alerts, without saying what either is.
    *
    * @param {import('../crypto.js').Sealer} sealer - Sealer of the batch
    * @returns {Promise<Object>}
@@ -71,6 +73,7 @@ export class ExceptionRecord {
     const { summary, detail, ...meta } = this.toJSON();
     return {
       ...meta,
+      ...this._fingerprint(),
       summary: await sealer.seal(JSON.stringify(summary), ExceptionRecord.summaryAad(this.id)),
       detail: await sealer.seal(JSON.stringify(detail), ExceptionRecord.detailAad(this.id))
     };
@@ -86,9 +89,16 @@ export class ExceptionRecord {
     const { summary, detail, ...meta } = this.toJSON();
     return {
       ...meta,
+      ...this._fingerprint(),
       summary: sealer.seal(JSON.stringify(summary), ExceptionRecord.summaryAad(this.id)),
       detail: sealer.seal(JSON.stringify(detail), ExceptionRecord.detailAad(this.id))
     };
+  }
+
+  // The fingerprint field of the sealed form; none when there isn't a valid one.
+  _fingerprint() {
+    const fingerprint = this.summary?.fingerprint;
+    return typeof fingerprint === 'string' && /^[0-9a-f]{16}$/.test(fingerprint) ? { fingerprint } : {};
   }
 
   /**

@@ -40,6 +40,18 @@ const RELEASE = /^[A-Za-z0-9._:@/+-]{1,64}$/;
 const MAX_SAMPLES = 120;
 const SAMPLE_BYTES = ['rss', 'heapUsed', 'heapTotal', 'external'];
 const SAMPLE_DELAYS = ['loopP50', 'loopP99', 'loopMax'];
+// Later additions, each optional (older SDKs don't send them): the field, and its largest value.
+const SAMPLE_EXTRAS = [
+  ['arrayBuffers', 1e13],
+  ['heapLimit', 1e13],
+  ['elu', 100],
+  ['gcCount', 1e7],
+  ['gcMs', 1e7],
+  ['gcMax', 1e7],
+  ['handles', 1e7],
+  ['requests', 1e9],
+  ['inFlight', 1e7]
+];
 
 /**
  * A validated ingest batch: `{ project, instance, requests, exceptions, samples, blocked }`.
@@ -307,6 +319,10 @@ function readSamples(value) {
       const number = sample[key];
       clean[key] = Number.isFinite(number) && number >= 0 && number <= 1e7 ? number : null;
     }
+    for (const [key, max] of SAMPLE_EXTRAS) {
+      const number = sample[key];
+      clean[key] = Number.isFinite(number) && number >= 0 && number <= max ? number : null;
+    }
     return [clean];
   });
 }
@@ -324,8 +340,13 @@ function readLocation(value) {
 // Who a request or exception was for: short strings only, null when it names nobody.
 function readUser(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const user = { id: text(value.id, 128) || null, email: text(value.email, 254) || null, name: text(value.name, 128) || null };
-  return user.id || user.email || user.name ? user : null;
+  const user = {
+    id: text(value.id, 128) || null,
+    email: text(value.email, 254) || null,
+    name: text(value.name, 128) || null,
+    phone: text(value.phone, 32) || null
+  };
+  return user.id || user.email || user.name || user.phone ? user : null;
 }
 
 function readRequestLine(value) {

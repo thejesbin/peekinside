@@ -20,6 +20,7 @@ import { JobRunRecord } from '../jobs/job-run-record.js';
 import { LogRecord } from '../logs/log-record.js';
 import { RequestRecord } from '../record.js';
 import { Spool } from '../spool.js';
+import { RuleMatcher } from '../alerts/rule-matcher.js';
 import { BatchTransport } from './batch.js';
 
 const FLUSH_INTERVAL_MS = 1000;
@@ -86,7 +87,7 @@ export class CloudTransport extends BatchTransport {
   constructor({ apiKey, environment, release = null, version }) {
     const key = ApiKey.parse(apiKey);
     if (!key) {
-      throw new Error('PEEKINSIDE_API_KEY is not a valid PeekInside API key');
+      throw new Error(ApiKey.problem(apiKey));
     }
     super({
       environment: RequestRecord.normalizeEnvironment(environment, 'production'),
@@ -121,6 +122,8 @@ export class CloudTransport extends BatchTransport {
 
     this._resendTimer = null;
     this._resending = null;
+    // Alert rules on sealed fields, checked here before records are sealed (started with the first batch).
+    this.rules = new RuleMatcher({ fetchRules: () => this._fetchRules() });
     // Set when records that didn't fit in the last POST wait for the next one.
     this._more = false;
     // Batches spooled by an earlier run that crashed.
@@ -137,6 +140,7 @@ export class CloudTransport extends BatchTransport {
     clearInterval(this.timer);
     clearTimeout(this._resendTimer);
     this._resendTimer = null;
+    this.rules.stop();
     super.stop();
   }
 
@@ -189,6 +193,7 @@ export class CloudTransport extends BatchTransport {
   // even a large one, or it would block the queue.
   async _pack(batch, sealer) {
     const lists = { events: [], exceptions: [], jobs: [], logs: [] };
+    const alerts = [];
     let size = 32;
     let count = 0;
     for (const record of batch) {
@@ -198,8 +203,10 @@ export class CloudTransport extends BatchTransport {
       size += length;
       count++;
       lists[listFor(record)].push(sealed);
+      // Which alert rules it met on what only this server can read: ids, never the content.
+      alerts.push(...this.rules.matches(record));
     }
-    return { ...lists, rest: batch.slice(count) };
+    return { ...lists, alerts, rest: batch.slice(count) };
   }
 
   // Records that didn't fit go back to the front of the queue, in order, and go out right away.
@@ -213,11 +220,12 @@ export class CloudTransport extends BatchTransport {
   async _deliver(batch) {
     // A fresh ephemeral key per batch: one key agreement, a new IV per message.
     const sealer = await Sealer.create(this.apiKey.publicKey, 'event');
-    const { events, exceptions, jobs, logs, rest } = await this._pack(batch, sealer);
+    const { events, exceptions, jobs, logs, alerts, rest } = await this._pack(batch, sealer);
     const body = { events };
     if (exceptions.length) body.exceptions = exceptions;
     if (jobs.length) body.jobs = jobs;
     if (logs.length) body.logs = logs;
+    if (alerts.length) body.alerts = alerts;
     const samples = this.takeSamples();
     if (samples.length) {
       body.instance = { ...this.instance, environment: this.environment, release: this.release };
@@ -234,6 +242,8 @@ export class CloudTransport extends BatchTransport {
     const sent = batch.length - rest.length;
 
     if (response.ok) {
+      // PeekInside Cloud answers: from now on, the alert rules it holds are checked here too.
+      this.rules.start();
       this._requeue(rest);
       return true;
     }
@@ -285,6 +295,15 @@ export class CloudTransport extends BatchTransport {
   // An invalid key or an inactive plan loses every request from now on: an error, not a warning.
   _logDisabled(line) {
     console.error(line);
+  }
+
+  // The project's alert rules on sealed fields, from beside the ingest endpoint.
+  async _fetchRules() {
+    if (this.exiting) throw new Error('exiting');
+    // Never after a redirect: the API key goes only where batches go (see _post).
+    const response = await fetch(`${this.endpoint}/alert-rules`, { headers: this._headers(), redirect: 'manual', signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
   }
 
   _headers() {

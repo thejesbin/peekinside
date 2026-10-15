@@ -259,7 +259,7 @@ test('Express: setUser() puts the user on the request and on its exceptions', as
   const peekInside = attach(app, name);
   const outside = PeekInside.setUser({ id: 'nobody' });
   app.use((req, res, next) => {
-    if (req.headers['x-user']) PeekInside.setUser({ id: Number(req.headers['x-user']), email: `user${req.headers['x-user']}@example.test`, password: 'never kept' });
+    if (req.headers['x-user']) PeekInside.setUser({ id: Number(req.headers['x-user']), email: `user${req.headers['x-user']}@example.test`, mobile: 919876543210, password: 'never kept' });
     next();
   });
   app.get('/checkout', () => {
@@ -276,7 +276,7 @@ test('Express: setUser() puts the user on the request and on its exceptions', as
     assert.equal(outside, false, 'no request to attach a user to');
 
     const result = await stored(peekInside, name, (state) => state.exceptions.length === 3 && state.requests.length === 3);
-    const ada = { id: '42', email: 'user42@example.test', name: null };
+    const ada = { id: '42', email: 'user42@example.test', name: null, phone: '919876543210' };
     const [withUser, anonymous, reported] = result.requests;
     assert.deepEqual(withUser.user, ada);
     assert.equal(anonymous.user, null);
@@ -284,7 +284,7 @@ test('Express: setUser() puts the user on the request and on its exceptions', as
 
     const declined = result.exceptions.filter((item) => item.message === 'card declined');
     assert.deepEqual(declined.map((item) => item.user), [ada, null]);
-    assert.deepEqual(exceptionFor(result, 'for someone else').user, { id: 'user_7', email: null, name: null }, 'report({ user }) wins');
+    assert.deepEqual(exceptionFor(result, 'for someone else').user, { id: 'user_7', email: null, name: null, phone: null }, 'report({ user }) wins');
   } finally {
     peekInside.stop();
     server.close();

@@ -5,6 +5,7 @@ Debug Node.js from the inside: every error with the request that set it off, the
 [![npm](https://img.shields.io/npm/v/peekinside?color=18b69b)](https://www.npmjs.com/package/peekinside)
 ![License](https://img.shields.io/badge/license-MIT-18b69b)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-18b69b)
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=000000)](https://buymeacoffee.com/thejesbin)
 
 ## Install
 
@@ -38,8 +39,15 @@ Everything else is in the docs: **[peekinside.dev/docs](https://peekinside.dev/d
 - [Logs](https://peekinside.dev/docs/logs)
 - [Jobs and schedules](https://peekinside.dev/docs/jobs)
 - [Runtime](https://peekinside.dev/docs/runtime)
+- [Alerts](https://peekinside.dev/docs/alerts)
 - [Configuration](https://peekinside.dev/docs/configuration)
 - [API](https://peekinside.dev/docs/api)
+
+## Support
+
+If PeekInside saves you a debugging session, you can buy me a coffee:
+
+[![Buy me a coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=thejesbin&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/thejesbin)
 
 ## License
 

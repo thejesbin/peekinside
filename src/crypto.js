@@ -177,13 +177,37 @@ export class ApiKey {
   }
 
   /**
-   * @param {string} apiKey
+   * @param {string} apiKey - Surrounding spaces and quotes are ignored (env files that keep them)
    * @returns {ApiKey|null} The key's parts, or null when it isn't a well-formed v1 key
    */
   static parse(apiKey) {
-    const [version, projectId, secret, publicKey, ...rest] = String(apiKey).trim().split('.');
+    const [version, projectId, secret, publicKey, ...rest] = ApiKey.unquote(apiKey).split('.');
     if (version !== 'pik1' || rest.length) return null;
     if (!PROJECT_ID.test(projectId) || !SECRET.test(secret) || !PUBLIC_KEY.test(publicKey)) return null;
     return new ApiKey({ projectId, secret, publicKey });
+  }
+
+  /**
+   * What's wrong with a value that isn't an API key, in words for the app's log. Never repeats the
+   * value: it may hold a secret.
+   *
+   * @param {string} value
+   * @returns {string} A sentence without its final period
+   */
+  static problem(value) {
+    const text = ApiKey.unquote(value);
+    if (PUBLIC_KEY.test(text) && Buffer.from(text, 'base64url')[0] === 4) {
+      return 'PEEKINSIDE_API_KEY holds your project\'s public key, not an API key. API keys start with "pik1.": create one in PeekInside Cloud, on the project\'s Settings page under API keys';
+    }
+    if (!text.startsWith('pik1.')) {
+      return 'PEEKINSIDE_API_KEY is not a PeekInside API key (those start with "pik1."). Create one in PeekInside Cloud, on the project\'s Settings page under API keys';
+    }
+    return 'PEEKINSIDE_API_KEY looks cut off or changed: copy the whole key, from "pik1." to its end';
+  }
+
+  // Without the spaces and one pair of matching quotes around it.
+  static unquote(value) {
+    const text = String(value).trim();
+    return /^(["'`]).*\1$/s.test(text) && text.length > 1 ? text.slice(1, -1).trim() : text;
   }
 }
