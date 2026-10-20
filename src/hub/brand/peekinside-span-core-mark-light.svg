@@ -1,0 +1,7 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="88" height="88" viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Light mode glyph">
+<path id="Parent request span" d="M6.875 17.875H56.375C60.7511 17.875 64.9479 19.6134 68.0423 22.7077C71.1366 25.8021 72.875 29.9989 72.875 34.375V53.625C72.875 58.0011 71.1366 62.1979 68.0423 65.2923C64.9479 68.3866 60.7511 70.125 56.375 70.125H81.125" stroke="#121A10" stroke-width="5" stroke-linecap="square" stroke-linejoin="round"/>
+<path id="Child execution span" d="M19.25 31.625H52.25C54.438 31.625 56.5365 32.4942 58.0836 34.0414C59.6308 35.5885 60.5 37.687 60.5 39.875V48.125C60.5 50.313 59.6308 52.4115 58.0836 53.9586C56.5365 55.5058 54.438 56.375 52.25 56.375H39.875" stroke="#121A10" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
+<path id="Measured core" d="M31.625 44H49.5" stroke="#18B69B" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
+</g>
+</svg>

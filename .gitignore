@@ -1,2 +1,16 @@
-package-lock.json
+# dependencies (a library ships without a lockfile)
 node_modules/
+package-lock.json
+
+# local settings and secrets
+.env*
+
+# npm pack output and test coverage
+*.tgz
+coverage/
+
+# editors, OS and logs
+.DS_Store
+.idea/
+.vscode/
+*.log

@@ -1,0 +1,13 @@
+{
+  // Type checks for index.d.ts, run by `npm run test:types`. Nothing here is executed.
+  // ES modules and CommonJS (.cts) on Node.js resolution: reads "exports" in package.json.
+  "compilerOptions": {
+    "strict": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["*.ts", "*.cts"]
+}

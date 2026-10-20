@@ -1,0 +1,16 @@
+{
+  // Older CommonJS setups: classic resolution reads "types" instead of "exports". It can't
+  // resolve a package's own name, so the path mapping points at this package's folder.
+  "compilerOptions": {
+    "strict": true,
+    "module": "commonjs",
+    "moduleResolution": "node10",
+    "esModuleInterop": true,
+    "target": "es2022",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": { "peekinside": [".."] }
+  },
+  "include": ["*.ts", "*.cts"]
+}
