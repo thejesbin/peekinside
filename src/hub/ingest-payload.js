@@ -13,9 +13,10 @@ import { PROJECT_ID } from './store.js';
 export const MAX_BATCH = 1000;
 // Exceptions per batch.
 export const MAX_EXCEPTIONS_BATCH = 500;
-// Job runs and log lines per batch.
+// Job runs, log lines and dumps per batch.
 export const MAX_JOBS_BATCH = 1000;
 export const MAX_LOGS_BATCH = 2000;
+export const MAX_DUMPS_BATCH = 1000;
 // Request ids are UUIDs in practice. They appear in URLs and index files, so only safe
 // characters are accepted.
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -27,13 +28,20 @@ const FINGERPRINT = /^[0-9a-f]{16}$/;
 const STAT_KEYS = ['queries', 'queryTime', 'slowQueries', 'nPlusOne', 'duplicates', 'http', 'httpTime', 'logs', 'loopBlock'];
 const STAT_TIMES = new Set(['queryTime', 'httpTime', 'loopBlock']);
 const MAX_STAT = 1e9;
-const MECHANISMS = new Set(['express', 'koa', 'fastify', 'http', 'uncaught', 'unhandledRejection', 'report', 'job']);
+const MECHANISMS = new Set(['express', 'koa', 'fastify', 'nest', 'hono', 'http', 'uncaught', 'unhandledRejection', 'report', 'job']);
 const JOB_STATUSES = new Set(['ok', 'failed']);
 const JOB_TRIGGERS = new Set(['cron', 'queue', 'manual']);
 const LOG_LEVELS = new Set(['debug', 'info', 'warn', 'error']);
-const LOG_SOURCES = new Set(['console', 'pino', 'winston']);
+const LOG_SOURCES = new Set(['console', 'pino', 'winston', 'nest']);
+// What the SDK keeps of a route pattern and a handler name.
+const MAX_ROUTE = 512;
+const MAX_HANDLER = 256;
 // What the index keeps of a log line; the line in full is its detail.
 const LOG_PREVIEW = 500;
+// What the index keeps of a dump: its label, the type and a one-line preview of its value.
+const DUMP_LABEL = 120;
+const DUMP_TYPE = 64;
+const DUMP_PREVIEW = 200;
 // What release.js produces.
 const RELEASE = /^[A-Za-z0-9._:@/+-]{1,64}$/;
 // Process samples per batch (the SDK sends one every 10 seconds, more after the hub was down).
@@ -77,10 +85,14 @@ export class IngestPayload {
     }
     const jobs = body.jobs != null ? body.jobs : [];
     const logs = body.logs != null ? body.logs : [];
+    const dumps = body.dumps != null ? body.dumps : [];
     if (!Array.isArray(jobs) || jobs.length > MAX_JOBS_BATCH || !Array.isArray(logs) || logs.length > MAX_LOGS_BATCH) {
       return null;
     }
-    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, samples: body.samples, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
+    if (!Array.isArray(dumps) || dumps.length > MAX_DUMPS_BATCH) {
+      return null;
+    }
+    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, samples: body.samples, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
   }
 
   /**
@@ -93,12 +105,13 @@ export class IngestPayload {
    * @param {Array} [parts.exceptions] - Exception records as sent
    * @param {Array} [parts.jobs] - Job runs as sent
    * @param {Array} [parts.logs] - Log lines as sent
+   * @param {Array} [parts.dumps] - Dumps as sent
    * @param {*} [parts.samples] - Process samples (memory, CPU, event-loop delay), as sent
    * @param {*} parts.blocked - Counts of unrecorded server requests, as sent
    * @param {boolean} [parts.hasExceptions=false] - Whether the batch had an exception list (SDKs
    *   from before exceptions don't send one)
    */
-  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], samples, blocked, hasExceptions = false }) {
+  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], samples, blocked, hasExceptions = false }) {
     this.project = project;
     this.instance = instance;
     /**
@@ -139,6 +152,12 @@ export class IngestPayload {
     this.logs = logs.map(readLog).filter(Boolean);
     this.rejectedJobs = jobs.length - this.jobs.length;
     this.rejectedLogs = logs.length - this.logs.length;
+    /**
+     * The valid dumps, flattened into what the store keeps (the value's tree is the detail)
+     * @type {Object[]}
+     */
+    this.dumps = dumps.map(readDump).filter(Boolean);
+    this.rejectedDumps = dumps.length - this.dumps.length;
     /**
      * The valid counts of server requests the SDK didn't record
      * @type {{ kind: 'host'|'client', value: string, count: number }[]}
@@ -196,6 +215,8 @@ function readRecord(value) {
     url: text(summary.url, 16384),
     path: text(summary.path, 16384),
     contentType: text(summary.contentType, 256),
+    route: text(summary.route, MAX_ROUTE) || null,
+    handler: text(summary.handler, MAX_HANDLER) || null,
     user: readUser(summary.user),
     detail
   };
@@ -299,6 +320,43 @@ function readLog(value) {
   };
 }
 
+// A dump: its fields, the start of its value for the list, and the value's tree as its detail. The
+// tree is the dashboard's to read; the hub only keeps it.
+function readDump(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (typeof value.id !== 'string' || !REQUEST_ID.test(value.id) || !Number.isFinite(value.occurredAt)) return null;
+  if (!optionalId(value.requestId) || !optionalId(value.jobRunId)) return null;
+  const summary = value.summary && typeof value.summary === 'object' ? value.summary : {};
+  const detail = value.detail && typeof value.detail === 'object' && !Array.isArray(value.detail) ? value.detail : {};
+  const tree = detail.value && typeof detail.value === 'object' && !Array.isArray(detail.value) && typeof detail.value.t === 'string' ? detail.value : { t: 'undef' };
+  return {
+    id: value.id,
+    occurredAt: value.occurredAt,
+    environment: text(value.environment, 32) || 'development',
+    release: release(value.release),
+    requestId: value.requestId || null,
+    jobRunId: value.jobRunId || null,
+    label: text(value.label, DUMP_LABEL) || null,
+    location: readCaller(value.location),
+    type: text(summary.type, DUMP_TYPE) || 'value',
+    preview: text(summary.preview, DUMP_PREVIEW),
+    truncated: summary.truncated === true,
+    detail: { value: tree }
+  };
+}
+
+// Where in the app something happened: an absolute file, the same relative to the project, a line.
+function readCaller(value) {
+  if (!value || typeof value !== 'object' || typeof value.file !== 'string' || !value.file) return null;
+  return {
+    file: value.file.slice(0, 4096),
+    relativeFile: typeof value.relativeFile === 'string' ? value.relativeFile.slice(0, 4096) : null,
+    line: positiveInt(value.line),
+    column: positiveInt(value.column),
+    function: typeof value.function === 'string' ? value.function.slice(0, 1024) : null
+  };
+}
+
 function optionalId(value) {
   return value === null || value === undefined || (typeof value === 'string' && REQUEST_ID.test(value));
 }
@@ -351,7 +409,9 @@ function readUser(value) {
 
 function readRequestLine(value) {
   if (!value || typeof value !== 'object' || typeof value.method !== 'string' || typeof value.path !== 'string') return null;
-  return { method: value.method.slice(0, 16), path: value.path.slice(0, 16384) };
+  const route = text(value.route, MAX_ROUTE);
+  const handler = text(value.handler, MAX_HANDLER);
+  return { method: value.method.slice(0, 16), path: value.path.slice(0, 16384), ...(route ? { route } : {}), ...(handler ? { handler } : {}) };
 }
 
 function positiveInt(value) {

@@ -4,7 +4,7 @@
  * Records every request and response your app handles. During development they go to the free
  * local dashboard, which is shared by all your projects and keeps its data on this machine.
  * With an API key they are encrypted and sent to PeekInside Cloud instead.
- * Works with Express, Koa, Fastify and the native http module.
+ * Works with Express, Koa, Fastify, NestJS, Hono and the native http module.
  *
  * Exceptions are recorded too: errors that reach the framework's error handling, crashes
  * (uncaught exceptions and unhandled rejections), and errors the app reports. Each is linked to the
@@ -12,6 +12,9 @@
  *
  * Each request also gets a timeline: the database queries, outgoing HTTP calls, console lines and
  * exceptions that happened while it was handled (see src/timeline and src/instrumentation).
+ *
+ * In development, dump() shows values in the local dashboard, under the request they were dumped
+ * in (see src/dumps).
  *
  * This class is the public API. It decides where requests go and which requests are recorded,
  * and leaves the work to the capture (src/capture), exception (src/exceptions), framework
@@ -26,6 +29,7 @@ import { isIgnoredPath } from './capture/ignored-paths.js';
 import { LOG_PREFIX, VERSION, settings } from './config.js';
 import { TrafficClassifier } from './deployment.js';
 import { ExceptionCapture } from './exceptions/exception-capture.js';
+import { DumpCapture } from './dumps/dump-capture.js';
 import { ProcessMonitor } from './exceptions/process-monitor.js';
 import { RequestContext } from './exceptions/request-context.js';
 import { Instrumentation } from './instrumentation/index.js';
@@ -33,8 +37,10 @@ import { isNativePromise } from './instrumentation/patch.js';
 import { TIMELINE_DEFAULTS, Timeline, TimelineSettings } from './timeline/timeline.js';
 import { ExpressAdapter } from './integrations/express.js';
 import { FastifyAdapter } from './integrations/fastify.js';
+import { HonoAdapter } from './integrations/hono.js';
 import { HttpServerAdapter } from './integrations/http-server.js';
 import { KoaAdapter } from './integrations/koa.js';
+import { NestAdapter } from './integrations/nest.js';
 import { ServerBinder } from './integrations/server-binder.js';
 import { ProjectIdentity } from './project.js';
 import { Release } from './release.js';
@@ -60,9 +66,10 @@ const DEFAULT_OPTIONS = {
   ...TIMELINE_DEFAULTS
 };
 
-// Tried in this order by attachTo(): Fastify and Koa apps also have use(), and anything with
-// use() is handled as middleware before falling back to a plain server.
-const ADAPTERS = [FastifyAdapter, KoaAdapter, ExpressAdapter, HttpServerAdapter];
+// Tried in this order by attachTo(): Nest apps (which pass Express's or Fastify's methods
+// through), Hono, Fastify and Koa apps also have use(), and anything with use() is handled as
+// middleware before falling back to a plain server.
+const ADAPTERS = [NestAdapter, HonoAdapter, FastifyAdapter, KoaAdapter, ExpressAdapter, HttpServerAdapter];
 
 // Marks requests already being recorded, so a request that passes through several integrations
 // (or PeekInside instances) is recorded once.
@@ -73,7 +80,7 @@ const kTracked = Symbol('peekInside.tracked');
  *
  * @class PeekInside
  * @example
- * // Express, Koa, Fastify or an http.Server
+ * // Express, Koa, Fastify, NestJS, Hono or an http.Server
  * PeekInside.attach(app);
  *
  * @example
@@ -104,8 +111,8 @@ class PeekInside {
    *   "v2.4.0". Defaults to PEEKINSIDE_RELEASE, then the commit your host deployed (Vercel, Render,
    *   Railway, Heroku and others set it), then the commit checked out in the project folder.
    * @param {boolean} [options.captureExceptions=true] - Record exceptions automatically: errors that
-   *   reach Express, Koa or Fastify error handling, uncaught exceptions and unhandled rejections.
-   *   report() works either way.
+   *   reach Express, Koa, Fastify, NestJS or Hono error handling, uncaught exceptions and unhandled
+   *   rejections. report() works either way.
    * @param {boolean} [options.sourceContext=true] - Include the source lines around the app's own
    *   stack frames in exception records
    * @param {boolean} [options.sourceMaps=true] - Map stack frames of compiled code (TypeScript
@@ -114,11 +121,12 @@ class PeekInside {
    *   queries, outgoing calls, console lines and exceptions
    * @param {boolean} [options.captureQueries=true] - pg, mysql2, MongoDB (and Mongoose), Prisma
    * @param {boolean} [options.captureOutgoing=true] - node:http/https requests and fetch
-   * @param {boolean} [options.captureLogs=true] - Log lines (the console, pino, winston): on request
-   *   timelines and the Logs page
+   * @param {boolean} [options.captureLogs=true] - Log lines (the console, pino, winston, NestJS's
+   *   Logger): on request timelines and the Logs page
    * @param {'debug'|'info'|'warn'|'error'} [options.logLevel='info'] - The lowest level the Logs
    *   page records
-   * @param {boolean} [options.captureJobs=true] - Runs of node-cron, cron and BullMQ jobs
+   * @param {boolean} [options.captureJobs=true] - Runs of node-cron, cron, BullMQ and
+   *   @nestjs/schedule jobs
    * @param {boolean} [options.queryParams=true] - Keep the (masked) values sent with queries
    * @param {number} [options.slowQueryMs=100] - Queries this slow or slower are flagged
    * @param {number} [options.nPlusOneThreshold=5] - A statement run this many times in one request
@@ -162,9 +170,10 @@ class PeekInside {
     this._sampler = null;
     // The requests this instance serves, counted for its process samples.
     this._requests = null;
-    // Log lines for the Logs page, and job runs.
+    // Log lines for the Logs page, job runs, and dumps (local mode only).
     this._logs = null;
     this._jobs = null;
+    this._dumps = null;
     this._servers = new ServerBinder(this, { onListening: (port) => this._onAppListening(port) });
 
     const environment = this.options.environment || settings.environment();
@@ -236,6 +245,9 @@ class PeekInside {
       const logs = this.options.captureLogs !== false;
       if (logs) {
         this._logs = new LogCapture({ level: LogCapture.level(this.options.logLevel), sink: () => this._transport, isEnabled: () => this.isEnabled });
+      }
+      if (this._local) {
+        this._dumps = new DumpCapture({ capture: this._exceptions, sink: () => this._transport, isEnabled: () => this.isEnabled });
       }
       this._jobs = new JobRunner({
         capture: this._exceptions,
@@ -362,6 +374,48 @@ class PeekInside {
       instance = null;
     }
     return instance ? instance.measure(name, fn) : fn();
+  }
+
+  /**
+   * Shows a value in the local dashboard instead of your terminal: on the Dumps page and under the
+   * request (or job run) it was dumped in, as a tree that opens level by level, with the line that
+   * dumped it. Returns the value, so it can wrap an expression in place.
+   *
+   * Dumps are for development: they go to the local dashboard only. With PeekInside Cloud, or when
+   * nothing is recorded, dump() just returns the value.
+   *
+   * @template T
+   * @param {T} value - Anything: objects, arrays, Maps, class instances, errors...
+   * @param {string} [label] - Shown with the dump, such as "cart before checkout"
+   * @returns {T} The same value
+   *
+   * @example
+   * const order = PeekInside.dump(await buildOrder(cart), 'order');
+   */
+  dump(value, label) {
+    if (this._dumps) this._dumps.record(value, label, PeekInside.prototype.dump);
+    return value;
+  }
+
+  /**
+   * PeekInside#dump() with the instance that tracks the current request, or else the most recently
+   * created instance that records.
+   *
+   * @template T
+   * @param {T} value
+   * @param {string} [label]
+   * @returns {T} The same value
+   */
+  static dump(value, label) {
+    try {
+      const context = RequestContext.current();
+      const capture = context && context.capture && context.capture.recording ? context.capture : ExceptionCapture.latest();
+      const owner = capture ? capture.owner : null;
+      if (owner && owner._dumps) owner._dumps.record(value, label, PeekInside.dump);
+    } catch (error) {
+      // The value comes back all the same.
+    }
+    return value;
   }
 
   /**
@@ -559,7 +613,9 @@ class PeekInside {
   /**
    * Attach to an application and record its traffic
    *
-   * Detects Fastify, Koa, Express-like apps (Express, Connect) and native `http.Server`s.
+   * Detects NestJS apps (and application contexts), Hono apps, Fastify, Koa, Express-like apps
+   * (Express, Connect) and native `http.Server`s. Attach a NestJS app before app.listen(), a Hono
+   * app before serve(), and a Fastify app before fastify.listen().
    *
    * @param {Object} app - Application or server instance
    * @param {Object} [options] - `maxBodySize` and `ignorePaths` to merge into the configuration
@@ -573,7 +629,7 @@ class PeekInside {
     if (Adapter) {
       this._adapter(Adapter).attach(app);
     } else {
-      console.warn(`${LOG_PREFIX} Could not detect the framework. Use expressMiddleware(), koaMiddleware(), fastifyHook() or wrapHttpServer().`);
+      console.warn(`${LOG_PREFIX} Could not detect the framework. Pass an Express, Koa, Fastify, NestJS or Hono app, or use expressMiddleware(), koaMiddleware(), fastifyHook() or wrapHttpServer().`);
     }
     return this;
   }
@@ -581,7 +637,7 @@ class PeekInside {
   /**
    * One-line setup: record every request an app handles
    *
-   * @param {Object} app - Express, Koa or Fastify app, or an http.Server
+   * @param {Object} app - Express, Koa, Fastify, NestJS or Hono app, or an http.Server
    * @param {Object} [options] - Configuration options (see constructor)
    * @returns {PeekInside} PeekInside instance
    *

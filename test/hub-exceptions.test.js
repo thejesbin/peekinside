@@ -135,11 +135,11 @@ test('ingest stores exceptions next to requests and rejects malformed ones', asy
     }
   });
   assert.equal(response.status, 200);
-  assert.deepEqual(response.json, { accepted: 1, rejected: 0, acceptedExceptions: 2, rejectedExceptions: 4, acceptedJobs: 0, acceptedLogs: 0 });
+  assert.deepEqual(response.json, { accepted: 1, rejected: 0, acceptedExceptions: 2, rejectedExceptions: 4, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0 });
 
   // Batches without an exception list (older SDKs) get the answer they know.
   const legacy = await request('POST', '/api/ingest', { headers: SDK, body: { project: PROJECT, instance: INSTANCE, requests: [] } });
-  assert.deepEqual(legacy.json, { accepted: 0, rejected: 0, acceptedJobs: 0, acceptedLogs: 0 });
+  assert.deepEqual(legacy.json, { accepted: 0, rejected: 0, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0 });
 
   const tooMany = Array.from({ length: 501 }, (_, i) => exception(100 + i));
   assert.equal((await request('POST', '/api/ingest', { headers: SDK, body: { project: PROJECT, instance: INSTANCE, requests: [], exceptions: tooMany } })).status, 400);
@@ -199,6 +199,7 @@ test('requests, projects and status describe exceptions too', async () => {
   assert.equal(project.exceptionCount, 2);
   assert.equal(project.lastExceptionAt, exception(2).occurredAt);
   assert.equal((await request('GET', '/api/status')).json.maxExceptions, 500);
+  assert.equal((await request('GET', '/api/status')).json.maxDumps, 1000, 'this hub keeps dumps');
 
   // Request records written before exceptions existed count none.
   store.append(PROJECT.id, [{ ...REQUEST, id: 'old-request', exceptionCount: undefined, url: '/old', path: '/old', detail: {} }]);

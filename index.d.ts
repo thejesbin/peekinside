@@ -3,8 +3,8 @@
  * and the exceptions that happen while handling them. In development they go to the free local
  * dashboard; with an API key they are encrypted and sent to PeekInside Cloud.
  *
- * The signatures are structural, so Express, Connect, Koa, Fastify and node:http objects fit
- * without PeekInside depending on any of those packages.
+ * The signatures are structural, so Express, Connect, Koa, Fastify, NestJS, Hono and node:http
+ * objects fit without PeekInside depending on any of those packages.
  */
 
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
@@ -67,8 +67,8 @@ export interface PeekInsideOptions {
   projectRoot?: string;
 
   /**
-   * Records exceptions automatically: errors that reach Express, Koa or Fastify error handling,
-   * uncaught exceptions and unhandled rejections. `report()` works either way.
+   * Records exceptions automatically: errors that reach Express, Koa, Fastify, NestJS or Hono error
+   * handling, uncaught exceptions and unhandled rejections. `report()` works either way.
    * @default true
    */
   captureExceptions?: boolean;
@@ -109,8 +109,8 @@ export interface PeekInsideOptions {
   captureOutgoing?: boolean;
 
   /**
-   * Records log lines from the console, pino and winston: on the timeline of the request (or job
-   * run) they are written in, and on the Logs page, from anywhere in the app.
+   * Records log lines from the console, pino, winston and NestJS's Logger: on the timeline of the
+   * request (or job run) they are written in, and on the Logs page, from anywhere in the app.
    * @default true
    */
   captureLogs?: boolean;
@@ -122,7 +122,8 @@ export interface PeekInsideOptions {
   logLevel?: "debug" | "info" | "warn" | "error";
 
   /**
-   * Records runs of node-cron, cron and BullMQ jobs automatically (see `job()` for other jobs).
+   * Records runs of node-cron, cron, BullMQ and @nestjs/schedule jobs automatically (see `job()`
+   * for other jobs).
    * @default true
    */
   captureJobs?: boolean;
@@ -217,9 +218,14 @@ export type CaptureOptions = Pick<PeekInsideOptions, "maxBodySize" | "ignorePath
 
 /**
  * What `PeekInside.attach()` understands: an Express or Connect app, a Koa app, a Fastify
- * instance, or a node:http (or https) server.
+ * instance, a NestJS app or application context, a Hono app, or a node:http (or https) server.
  */
-export type AttachTarget = Server | { use(...args: any[]): unknown } | { addHook(...args: any[]): unknown };
+export type AttachTarget =
+  | Server
+  | { use(...args: any[]): unknown }
+  | { addHook(...args: any[]): unknown }
+  | { select(...args: any[]): unknown; useLogger(...args: any[]): unknown }
+  | { fetch(...args: any[]): unknown; onError(...args: any[]): unknown };
 
 /** Express and Connect style middleware. */
 export type NodeMiddleware = (req: IncomingMessage, res: ServerResponse, next: (error?: unknown) => void) => void;
@@ -236,7 +242,7 @@ export type KoaMiddleware = (
  * @example
  * import PeekInside from "peekinside";
  *
- * PeekInside.attach(app); // Express, Koa, Fastify or an http.Server
+ * PeekInside.attach(app); // Express, Koa, Fastify, NestJS, Hono or an http.Server
  */
 declare class PeekInside {
   /**
@@ -255,9 +261,11 @@ declare class PeekInside {
   readonly release: string | null;
 
   /**
-   * One-line setup: records every request the app handles.
+   * One-line setup: records every request the app handles. Attach a NestJS app before
+   * `app.listen()`, a Hono app before `serve()`, and a Fastify app before `fastify.listen()`.
    *
-   * @param app - Express or Connect app, Koa app, Fastify instance, or http.Server
+   * @param app - Express or Connect app, Koa app, Fastify instance, NestJS app or application
+   *   context, Hono app, or http.Server
    */
   static attach(app: AttachTarget, options?: PeekInsideOptions): PeekInside;
 
@@ -300,6 +308,27 @@ declare class PeekInside {
    * created instance that records. Without one, just runs `fn`.
    */
   static measure<T>(name: string, fn: () => T): T;
+
+  /**
+   * Shows a value in the local dashboard instead of your terminal: on the Dumps page and under the
+   * request (or job run) it was dumped in, as a tree that opens level by level, with the line that
+   * dumped it. Returns the value, so it can wrap an expression in place.
+   *
+   * Dumps are for development: they go to the local dashboard only. With PeekInside Cloud, or when
+   * nothing is recorded, `dump()` just returns the value.
+   *
+   * @param label - Shown with the dump, such as `"cart before checkout"`
+   *
+   * @example
+   * const order = PeekInside.dump(await buildOrder(cart), "order");
+   */
+  dump<T>(value: T, label?: string): T;
+
+  /**
+   * `dump()` with the instance that tracks the current request, or else the most recently created
+   * instance that records.
+   */
+  static dump<T>(value: T, label?: string): T;
 
   /**
    * The id of the request the calling code runs for, as the dashboard knows it: put it in your

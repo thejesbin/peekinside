@@ -12,12 +12,14 @@
  *
  * Outgoing HTTP and console capture are process-wide subscriptions; they record only for code
  * running inside a request (log lines go to the Logs page from anywhere). Loggers (pino, winston)
- * and job libraries (node-cron, cron, BullMQ) are found and patched like the drivers.
+ * and job libraries (node-cron, cron, BullMQ) are found and patched like the drivers; NestJS's
+ * Logger and @nestjs/schedule are reached through the app instead (see integrations/nest.js).
  */
 
 import { createRequire } from 'module';
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { ConsoleInstrumentation } from './console.js';
 import { HttpInstrumentation } from './http.js';
 import { JobInstrumentation } from './jobs.js';
@@ -71,6 +73,10 @@ export class Instrumentation {
     if (!fromRoot) return patched;
     if (patchWith(fromRoot, 'pino', LoggerInstrumentation.pino)) patched.push('pino');
     if (patchWith(fromRoot, 'winston', LoggerInstrumentation.winston)) patched.push('winston');
+    // NestJS's ConsoleLogger, for a NestJS project.
+    if (declares(root, '@nestjs/common')) {
+      void importInstalled(fromRoot, '@nestjs/common', null, (common) => LoggerInstrumentation.nest(exported(common, 'ConsoleLogger')));
+    }
     return patched;
   }
 
@@ -91,6 +97,11 @@ export class Instrumentation {
       if (patchWith(fromRoot, name, patch)) patched.push(name);
       const directory = packageDirectory(main, name);
       if (directory) void JobInstrumentation.patchModuleBuild(directory, patch);
+    }
+    // @nestjs/schedule registers a NestJS app's scheduled methods as the app initializes, which a
+    // worker (NestFactory.createApplicationContext()) does before it can be attached.
+    if (declares(root, '@nestjs/schedule')) {
+      void importInstalled(fromRoot, '@nestjs/schedule', path.join('dist', 'schedule.explorer.js'), (explorer) => JobInstrumentation.nestSchedule(exported(explorer, 'ScheduleExplorer')));
     }
     return patched;
   }
@@ -217,12 +228,46 @@ function resolve(fromSomewhere, name) {
   }
 }
 
-// The folder of the package `name` that contains `file`.
+// The folder of the package `name` (scoped or not) that contains `file`.
 function packageDirectory(file, name) {
+  const [scope, base] = name.includes('/') ? name.split('/') : [null, name];
   for (let directory = path.dirname(file); ; directory = path.dirname(directory)) {
-    if (path.basename(directory) === name && fs.existsSync(path.join(directory, 'package.json'))) return directory;
+    const named = path.basename(directory) === base && (!scope || path.basename(path.dirname(directory)) === scope);
+    if (named && fs.existsSync(path.join(directory, 'package.json'))) return directory;
     if (path.dirname(directory) === directory) return null;
   }
+}
+
+// Whether the project's package.json depends on a package. Frameworks are only loaded for projects
+// that use them: a monorepo's shared node_modules may hold another app's.
+function declares(root, name) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    return ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies'].some((field) => Boolean(pkg[field] && pkg[field][name]));
+  } catch (error) {
+    return false;
+  }
+}
+
+// Loads a package installed in the project (or one of its files) the way an import does, which
+// gives the module instance the app runs whether the package ships CommonJS or ES modules, and
+// patches it.
+async function importInstalled(fromRoot, name, file, patch) {
+  const main = resolve(fromRoot, name);
+  const directory = main && file ? packageDirectory(main, name) : null;
+  const target = file ? directory && path.join(directory, file) : main;
+  if (!target || !fs.existsSync(target)) return false;
+  try {
+    return patch(await import(pathToFileURL(target).href));
+  } catch (error) {
+    return false;
+  }
+}
+
+// An export of a module, imported as an ES module or as CommonJS (under `default`).
+function exported(module, name) {
+  if (!module) return undefined;
+  return module[name] || (module.default && module.default[name]);
 }
 
 // The file a module object was loaded from, found in the CommonJS cache.

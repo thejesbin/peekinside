@@ -1,6 +1,6 @@
 /**
  * One log line, as the Logs page lists it (see the data contract): when, its level, where it came
- * from (console, pino, winston), the request or job run it belongs to, and the line itself.
+ * from (console, pino, winston, nest), the request or job run it belongs to, and the line itself.
  *
  * PeekInside Cloud receives the line sealed: only the time, level, source and links are readable.
  */
@@ -18,7 +18,7 @@ export class LogRecord {
    * @param {string} fields.environment
    * @param {string|null} [fields.release=null]
    * @param {'debug'|'info'|'warn'|'error'} fields.level
-   * @param {'console'|'pino'|'winston'} fields.source
+   * @param {'console'|'pino'|'winston'|'nest'} fields.source
    * @param {string|null} [fields.requestId=null] - The request it was written during
    * @param {string|null} [fields.jobRunId=null] - The job run it was written during
    * @param {{ message: string, fields?: Object|null }} fields.summary - The line (sealed in Cloud)

@@ -8,6 +8,7 @@
  *   exception-state.json     fingerprints the dashboard marked resolved
  *   jobs/00000001.*          job runs, in the same format
  *   logs/00000001.*          log lines: the index keeps the start of each line, the details the rest
+ *   dumps/00000001.*         dumps: the index keeps a preview of each value, the details its tree
  *
  * Process samples (memory, CPU, event-loop delay) are kept in memory only, for the Runtime page:
  * the last six hours of each of the project's recent processes.
@@ -33,13 +34,15 @@ const MAX_BLOCKED_ENTRIES = 10;
 const MAX_RUNTIME_SAMPLES = 2160;
 const MAX_RUNTIME_PROCESSES = 8;
 // Fields a summary may contain, in the order they are written.
-const SUMMARY_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'method', 'status', 'duration', 'requestSize', 'responseSize', 'aborted', 'exceptionCount', 'stats', 'url', 'path', 'contentType', 'user'];
+const SUMMARY_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'method', 'status', 'duration', 'requestSize', 'responseSize', 'aborted', 'exceptionCount', 'stats', 'url', 'path', 'contentType', 'route', 'handler', 'user'];
 const EXCEPTION_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'handled', 'fatal', 'requestId', 'jobRunId', 'name', 'message', 'code', 'fingerprint', 'mechanism', 'location', 'request', 'job', 'user'];
 const JOB_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'name', 'queue', 'schedule', 'timezone', 'trigger', 'status', 'duration', 'attempt', 'exceptionCount', 'stats', 'error', 'user'];
 const LOG_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'level', 'source', 'requestId', 'jobRunId', 'message'];
+const DUMP_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'requestId', 'jobRunId', 'label', 'location', 'type', 'preview', 'truncated'];
 const EXCEPTIONS_FOLDER = 'exceptions';
 const JOBS_FOLDER = 'jobs';
 const LOGS_FOLDER = 'logs';
+const DUMPS_FOLDER = 'dumps';
 
 /**
  * @typedef {Object} ProjectInfo
@@ -71,7 +74,8 @@ export class ProjectLog {
    * @param {number} limits.exceptionSegmentSize - Exceptions per segment file
    * @param {number} limits.maxJobs - Job runs kept
    * @param {number} limits.maxLogs - Log lines kept
-   * @param {{ requests?: SegmentLog, exceptions?: SegmentLog, jobs?: SegmentLog, logs?: SegmentLog }} [logs] - Logs
+   * @param {number} limits.maxDumps - Dumps kept
+   * @param {{ requests?: SegmentLog, exceptions?: SegmentLog, jobs?: SegmentLog, logs?: SegmentLog, dumps?: SegmentLog }} [logs] - Logs
    *   read from disk
    */
   constructor(dir, info, limits, logs = {}) {
@@ -82,6 +86,7 @@ export class ProjectLog {
     this.exceptions = logs.exceptions || new SegmentLog(path.join(dir, EXCEPTIONS_FOLDER), ProjectLog._exceptionOptions(info, limits));
     this.jobs = logs.jobs || new SegmentLog(path.join(dir, JOBS_FOLDER), ProjectLog._jobOptions(info, limits));
     this.logs = logs.logs || new SegmentLog(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits));
+    this.dumps = logs.dumps || new SegmentLog(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits));
     this.exceptionState = new ExceptionState(dir);
     // Processes running the project, by pid. In memory only: they check in again after a restart.
     this.instances = new Map();
@@ -111,7 +116,8 @@ export class ProjectLog {
       seqBase: 1,
       exceptionSeqBase: 1,
       jobSeqBase: 1,
-      logSeqBase: 1
+      logSeqBase: 1,
+      dumpSeqBase: 1
     }, limits);
     project.save();
     return project;
@@ -138,13 +144,15 @@ export class ProjectLog {
       exceptionSeqBase: Number(saved.exceptionSeqBase) || 1,
       jobSeqBase: Number(saved.jobSeqBase) || 1,
       logSeqBase: Number(saved.logSeqBase) || 1,
+      dumpSeqBase: Number(saved.dumpSeqBase) || 1,
       ...(isBlockedInfo(saved.blocked) ? { blocked: saved.blocked } : {})
     };
     return new ProjectLog(dir, info, limits, {
       requests: SegmentLog.load(dir, ProjectLog._requestOptions(info, limits)),
       exceptions: SegmentLog.load(path.join(dir, EXCEPTIONS_FOLDER), ProjectLog._exceptionOptions(info, limits)),
       jobs: SegmentLog.load(path.join(dir, JOBS_FOLDER), ProjectLog._jobOptions(info, limits)),
-      logs: SegmentLog.load(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits))
+      logs: SegmentLog.load(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits)),
+      dumps: SegmentLog.load(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits))
     });
   }
 
@@ -417,6 +425,48 @@ export class ProjectLog {
   }
 
   /**
+   * Stores new dumps; ones already stored (same id) are skipped.
+   *
+   * @param {Object[]} records - Validated dumps, with their detail (the value's tree)
+   * @returns {Object[]}
+   */
+  appendDumps(records) {
+    return this.dumps.append(records);
+  }
+
+  /**
+   * Dump summaries, newest first; oldest first when `after` is given.
+   *
+   * @param {{ after?: number, before?: number, limit: number }} query
+   * @returns {{ dumps: Object[], hasMore: boolean }}
+   */
+  listDumps(query) {
+    const { entries, hasMore } = this.dumps.list(query);
+    return { dumps: entries, hasMore };
+  }
+
+  /**
+   * One dump's value (its tree).
+   *
+   * @param {string} dumpId
+   * @returns {Object|null}
+   */
+  dumpDetail(dumpId) {
+    return this.dumps.detail(dumpId);
+  }
+
+  /**
+   * Deletes all dumps.
+   *
+   * @returns {void}
+   */
+  clearDumps() {
+    this.dumps.clear();
+    this.info.dumpSeqBase = this.dumps.seqBase;
+    this.save();
+  }
+
+  /**
    * Deletes the project's folder.
    *
    * @returns {void}
@@ -444,6 +494,7 @@ export class ProjectLog {
     const newest = this.requests.newest;
     const newestException = this.exceptions.newest;
     const newestJob = this.jobs.newest;
+    const newestDump = this.dumps.newest;
     return {
       id: this.info.id,
       name: this.info.name,
@@ -457,6 +508,8 @@ export class ProjectLog {
       jobCount: this.jobs.size,
       lastJobAt: newestJob ? newestJob.occurredAt : null,
       logCount: this.logs.size,
+      dumpCount: this.dumps.size,
+      lastDumpAt: newestDump ? newestDump.occurredAt : null,
       online: instances.length > 0,
       instances,
       blocked: this.info.blocked && now - this.info.blocked.lastAt < BLOCKED_NOTICE_MS ? this.info.blocked : null
@@ -495,6 +548,7 @@ export class ProjectLog {
     this.exceptions.enforceRetention();
     this.jobs.enforceRetention();
     this.logs.enforceRetention();
+    this.dumps.enforceRetention();
   }
 
   static _requestOptions(info, limits) {
@@ -507,6 +561,10 @@ export class ProjectLog {
 
   static _logOptions(info, limits) {
     return { maxEntries: limits.maxLogs, segmentSize: Math.max(10, Math.ceil(limits.maxLogs / 4)), seqBase: info.logSeqBase || 1, pick: pickLog };
+  }
+
+  static _dumpOptions(info, limits) {
+    return { maxEntries: limits.maxDumps, segmentSize: Math.max(10, Math.ceil(limits.maxDumps / 4)), seqBase: info.dumpSeqBase || 1, pick: pickDump };
   }
 
   static _exceptionOptions(info, limits) {
@@ -533,6 +591,9 @@ function pickSummary(source) {
   // Stored before releases (or users) were recorded.
   if (summary.release === undefined) summary.release = null;
   if (summary.user === undefined) summary.user = null;
+  // Stored before route patterns were recorded, or from a framework that doesn't name them.
+  if (summary.route === undefined) summary.route = null;
+  if (summary.handler === undefined) summary.handler = null;
   return summary;
 }
 
@@ -549,6 +610,12 @@ function pickException(source) {
 function pickJob(source) {
   const summary = {};
   for (const field of JOB_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
+  return summary;
+}
+
+function pickDump(source) {
+  const summary = {};
+  for (const field of DUMP_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
   return summary;
 }
 

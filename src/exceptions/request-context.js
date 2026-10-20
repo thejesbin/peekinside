@@ -14,15 +14,24 @@
  * The context also keeps the request's exception bookkeeping: which errors were already recorded
  * (each error object is recorded once per request), the records whose outcome is still open (see
  * ExceptionCapture), and the count and links that go into the request's record.
+ *
+ * Integrations that know what the framework matched the request to note it here (noteRoute()):
+ * the route pattern, the code that handles it and the route parameters. The request's record and
+ * its exceptions carry them.
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
 import { BodyDecoder } from '../capture/body-decoder.js';
-import { parseQuery, splitUrl } from '../capture/http-message.js';
-import { LIMITS } from './limits.js';
+import { parseQuery, splitUrl, stringParams } from '../capture/http-message.js';
+import { LIMITS, truncate } from './limits.js';
 
 const storage = new AsyncLocalStorage();
 const kContext = Symbol('peekInside.context');
+// What a route pattern and a handler name may take up.
+const MAX_ROUTE = 512;
+const MAX_HANDLER = 256;
+// Dumps listed in a request's record (the Dumps page has them all).
+const MAX_DUMP_LINKS = 20;
 // The request an exception last escaped from, until the current job ends.
 let escaped = null;
 
@@ -83,7 +92,7 @@ export class RequestContext {
    * @param {boolean} [fields.blocked=false] - The request reached a server in local mode: neither
    *   it nor its exceptions are recorded
    * @param {string} [fields.integration='custom'] - Where tracking started: "express", "koa",
-   *   "fastify", "http" (a server's emit()) or "custom" (intercept())
+   *   "fastify", "nest", "hono", "http" (a server's emit()) or "custom" (intercept())
    */
   constructor({ capture, req, recorder = null, target, blocked = false, integration = 'custom' }) {
     this.capture = capture;
@@ -119,8 +128,26 @@ export class RequestContext {
      * @type {import('../user.js').User|null}
      */
     this.user = null;
+    /**
+     * The route pattern the framework matched ("/users/:id"), once an integration noted it
+     * @type {string|null}
+     */
+    this.route = null;
+    /**
+     * The code that handles the request ("UsersController.findOne"), once an integration noted it
+     * @type {string|null}
+     */
+    this.handler = null;
+    /**
+     * Dumps made during the request (PeekInside.dump()), for its record
+     * @type {{ id: string, label: string|null, type: string, preview: string }[]}
+     */
+    this.dumps = [];
 
     this._req = req;
+    // Route parameters an integration noted (or a function returning them), for frameworks that
+    // don't put them on the Node.js request.
+    this._params = undefined;
     // What remains for exceptions after the request finished (see release()).
     this._after = null;
 
@@ -169,12 +196,81 @@ export class RequestContext {
   }
 
   /**
-   * For the exception list: the request's method and path.
+   * Notes what the framework matched the request to, as an integration learns it. Each part that is
+   * given replaces the one noted before; null forgets it, and parts left out stay as they are.
    *
-   * @returns {{ method: string, path: string }}
+   * @param {Object} match
+   * @param {string|null} [match.route] - The route pattern, such as "/users/:id"
+   * @param {string|null} [match.handler] - The code that handles it, such as "UsersController.findOne"
+   * @param {Object|(() => Object)|null} [match.params] - The route parameters, or a function that
+   *   returns them when they are needed, for frameworks that keep them off the Node.js request
+   * @returns {void}
+   */
+  noteRoute({ route, handler, params } = {}) {
+    if (route !== undefined) this.route = typeof route === 'string' && route ? truncate(route, MAX_ROUTE) : null;
+    if (handler !== undefined) this.handler = typeof handler === 'string' && handler ? truncate(handler, MAX_HANDLER) : null;
+    if (params !== undefined) this._params = params;
+  }
+
+  /**
+   * The route parameters an integration noted, as strings.
+   *
+   * @returns {Object<string, string>|null} null when none were noted
+   */
+  routeParams() {
+    let params = this._params;
+    if (typeof params === 'function') {
+      try {
+        params = params();
+      } catch (error) {
+        params = null;
+      }
+    }
+    return params && typeof params === 'object' ? stringParams(params) : null;
+  }
+
+  /**
+   * For the exception list: the request's method and path, and its route and handler when known.
+   *
+   * @returns {{ method: string, path: string, route?: string, handler?: string }}
    */
   requestLine() {
-    return { method: this.method, path: this.path };
+    return {
+      method: this.method,
+      path: this.path,
+      ...(this.route ? { route: this.route } : {}),
+      ...(this.handler ? { handler: this.handler } : {})
+    };
+  }
+
+  /**
+   * Counts a dump made during the request: listed on its record, and placed on its timeline.
+   *
+   * @param {import('../dumps/dump-record.js').DumpRecord} record
+   * @returns {void}
+   */
+  noteDump(record) {
+    if (this.dumps.length < MAX_DUMP_LINKS) this.dumps.push(record.link());
+    if (this.timeline) this.timeline.dump(record);
+  }
+
+  /**
+   * Adds what the request's record shows of the request beyond the exchange itself: who it was for,
+   * its route and handler, the dumps made during it, and route parameters the Node.js request
+   * didn't carry.
+   *
+   * @param {import('../capture/exchange-recorder.js').Exchange} exchange - Changed in place
+   * @returns {void}
+   */
+  describe(exchange) {
+    if (this.user) exchange.user = this.user;
+    if (this.route) exchange.route = this.route;
+    if (this.handler) exchange.handler = this.handler;
+    if (this.dumps.length) exchange.dumps = this.dumps.slice();
+    if (this._params !== undefined && (!exchange.params || !Object.keys(exchange.params).length)) {
+      const params = this.routeParams();
+      if (params) exchange.params = params;
+    }
   }
 
   /**
@@ -185,9 +281,11 @@ export class RequestContext {
    */
   snapshot() {
     if (this.recorder && !this.recorder.recorded) {
-      return { id: this.requestId, ...this.recorder.snapshot(LIMITS.requestBody) };
+      const snapshot = { id: this.requestId, ...this.recorder.snapshot(LIMITS.requestBody) };
+      if (this._params !== undefined && !Object.keys(snapshot.params).length) snapshot.params = this.routeParams() || {};
+      return snapshot;
     }
-    const after = this._after || RequestSnapshot.partsOf(this._req);
+    const after = this._after || this._parts();
     return {
       id: this.requestId,
       method: this.method,
@@ -223,7 +321,7 @@ export class RequestContext {
   complete(exchange) {
     if (this.capture) this.capture.finish(this, exchange);
     this.completeTimeline(exchange);
-    if (this.user) exchange.user = this.user;
+    this.describe(exchange);
     this.release();
   }
 
@@ -253,10 +351,20 @@ export class RequestContext {
    */
   release() {
     this.finished = true;
-    this._after = RequestSnapshot.partsOf(this._req);
+    this._after = this._parts();
+    // A function returning the parameters may hold the framework's request.
+    if (typeof this._params === 'function') this._params = this.routeParams();
     this._req = null;
     this.recorder = null;
     this.timeline = null;
+  }
+
+  // The small parts of the request a snapshot keeps, with the parameters an integration noted when
+  // the request has none of its own.
+  _parts() {
+    const parts = RequestSnapshot.partsOf(this._req);
+    if (this._params !== undefined && !Object.keys(parts.params).length) parts.params = this.routeParams() || {};
+    return parts;
   }
 }
 

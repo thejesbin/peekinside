@@ -37,7 +37,7 @@ export const TIMELINE_DEFAULTS = Object.freeze({
 });
 
 // Spans listed per request, by type.
-const SPAN_CAPS = Object.freeze({ query: 500, http: 100, log: 200, measure: 100, exception: 10, block: 20 });
+const SPAN_CAPS = Object.freeze({ query: 500, http: 100, log: 200, measure: 100, exception: 10, block: 20, dump: 50 });
 const MAX_STATEMENTS = 200;
 // Executions per statement whose parameters are kept.
 const PARAMS_PER_STATEMENT = 20;
@@ -121,7 +121,7 @@ export class Timeline {
     this.origin = origin;
     this.closed = false;
     this.spans = [];
-    this.listed = { query: 0, http: 0, log: 0, measure: 0, exception: 0, block: 0 };
+    this.listed = { query: 0, http: 0, log: 0, measure: 0, exception: 0, block: 0, dump: 0 };
     this.dropped = 0;
     this.statements = [];
     this.byFingerprint = new Map();
@@ -263,7 +263,7 @@ export class Timeline {
    *
    * @param {'debug'|'info'|'warn'|'error'} level
    * @param {string} message - Formatted as it was written
-   * @param {'console'|'pino'|'winston'} [source='console']
+   * @param {'console'|'pino'|'winston'|'nest'} [source='console']
    * @returns {void}
    */
   log(level, message, source = 'console') {
@@ -279,6 +279,27 @@ export class Timeline {
       }
     } catch (error) {
       // A message that can't be read as text isn't recorded.
+    }
+  }
+
+  /**
+   * Records a dump made during the request (local dashboard only): its label and a preview of the
+   * value; the Dumps page has the value itself.
+   *
+   * @param {{ id: string, label: string|null, summary: { preview: string } }} record - A DumpRecord
+   * @returns {void}
+   */
+  dump(record) {
+    if (this.closed) return;
+    try {
+      if (this.listed.dump < SPAN_CAPS.dump) {
+        this.listed.dump++;
+        this.spans.push({ type: 'dump', start: this._offset(performance.now()), id: record.id, label: record.label, preview: cut(record.summary.preview, MAX_LOG) });
+      } else {
+        this.dropped++;
+      }
+    } catch (error) {
+      // The dump is still on the Dumps page.
     }
   }
 

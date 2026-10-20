@@ -3,9 +3,10 @@
  * it, and registers the app as soon as it is known) and, for plain http servers, to see every
  * request.
  *
- * Servers are found three ways: passed directly (http.Server, Fastify), returned by a patched
- * app.listen() (Express, Koa), or discovered from the socket of a request the app handled, which
- * catches servers created with http.createServer(app).
+ * Servers are found three ways: passed directly (http.Server, Fastify, the server a NestJS app
+ * created), returned by a patched app.listen() (Express, Koa), or discovered from the socket of a
+ * request the app handled, which catches servers created with http.createServer(app) and Hono's
+ * serve().
  */
 
 /**
@@ -73,10 +74,12 @@ export class ServerBinder {
    * @param {import('http').Server} server
    * @param {Object} [options]
    * @param {boolean} [options.interceptRequests=false] - Also record every request the server
-   *   emits, for plain http servers where no middleware runs
+   *   emits, for plain http servers where no middleware runs, and for frameworks recorded before
+   *   their own code runs (NestJS)
+   * @param {string} [options.integration='http'] - The integration recording those requests
    * @returns {void}
    */
-  bind(server, { interceptRequests = false } = {}) {
+  bind(server, { interceptRequests = false, integration = 'http' } = {}) {
     if (!server || typeof server.emit !== 'function' || this._bound.has(server)) {
       return;
     }
@@ -91,7 +94,7 @@ export class ServerBinder {
       server.emit = function (event, req, res) {
         if (event === 'request' && req && res) {
           const args = arguments;
-          return peekInside._intercept(req, res, () => originalEmit.apply(this, args), 'http');
+          return peekInside._intercept(req, res, () => originalEmit.apply(this, args), integration);
         }
         return originalEmit.apply(this, arguments);
       };

@@ -11,8 +11,12 @@ app.use((req, res, next) => {
   const attached: boolean = PeekInside.setUser({ id: 42, email: "ada@example.com", name: "Ada", phone: "+91 98765 43210" });
   const sent: Promise<number> = PeekInside.job("send-invoices", async () => 3, { schedule: "0 * * * *", data: { batch: 1 } });
   const count: number = peek.job("count", () => 1);
+  const cart: { items: string[] } = PeekInside.dump({ items: ["sku-1"] }, "cart");
+  const total: number = peek.dump(42);
   void sent;
   void count;
+  void cart;
+  void total;
   peek.setUser("user_42");
   void attached;
   next();

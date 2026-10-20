@@ -13,7 +13,8 @@
  * - Whether an Express error was handled is only known later: an error middleware that receives
  *   it may still pass it on to Express's final handler. Such records stay open on the request and
  *   are settled when the error reaches the final handler (unhandled) or the request's record is
- *   built (handled).
+ *   built (handled). NestJS exception filters and Hono error handlers work the same way: one that
+ *   takes an error may still hand it to the framework's default answer.
  *
  * Nothing here ever throws into the app: a failure to record is a lost exception, never a new one.
  */
@@ -134,12 +135,12 @@ export class ExceptionCapture {
   }
 
   /**
-   * An error reached a framework during a request: Express, Koa or Fastify.
+   * An error reached a framework during a request: Express, Koa, Fastify, NestJS or Hono.
    *
    * @param {RequestContext|null} context - The request's context
    * @param {*} error
    * @param {Object} options
-   * @param {'express'|'koa'|'fastify'} options.mechanism
+   * @param {'express'|'koa'|'fastify'|'nest'|'hono'} options.mechanism
    * @param {boolean} options.handled - Whether the app handled it
    * @param {boolean} [options.open=false] - The outcome isn't final yet (see the module comment)
    * @returns {string|null} The exception's id, or null when nothing was recorded
@@ -290,7 +291,7 @@ export class ExceptionCapture {
           exchange.exceptionCount = own.exceptionCount;
           exchange.exceptions = own.links.slice();
           own.completeTimeline(exchange);
-          if (own.user) exchange.user = own.user;
+          own.describe(exchange);
           exchanges.push(exchange);
         }
       }

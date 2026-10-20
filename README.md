@@ -21,11 +21,13 @@ const app = express();
 PeekInside.attach(app);
 ```
 
-Start your app, and PeekInside prints the link to its dashboard. It works with Express, Koa, Fastify and the native http module.
+Start your app, and PeekInside prints the link to its dashboard. It works with Express, Koa, Fastify, NestJS, Hono and the native http module.
 
 Check the setup before anything breaks on its own: `npx peekinside test` sends a test error from your project.
 
-Also recorded: background jobs (node-cron, cron, BullMQ, or `PeekInside.job()`, with an email when a scheduled job misses its run), log lines from the console, pino and winston, event-loop blocks and memory, the deploy each error came from, the user it happened to (`PeekInside.setUser()`), and TypeScript lines through your source maps.
+While you develop, `PeekInside.dump(value)` shows any value in the local dashboard instead of your terminal: as a tree you can open, under the request it belongs to, with the line that dumped it.
+
+Also recorded: background jobs (node-cron, cron, BullMQ, @nestjs/schedule, or `PeekInside.job()`, with an email when a scheduled job misses its run), log lines from the console, pino, winston and NestJS's Logger, event-loop blocks and memory, the deploy each error came from, the user it happened to (`PeekInside.setUser()`), and TypeScript lines through your source maps.
 
 ## Documentation
 
@@ -38,6 +40,7 @@ Everything else is in the docs: **[peekinside.dev/docs](https://peekinside.dev/d
 - [Timeline and queries](https://peekinside.dev/docs/timeline)
 - [Logs](https://peekinside.dev/docs/logs)
 - [Jobs and schedules](https://peekinside.dev/docs/jobs)
+- [Dumps](https://peekinside.dev/docs/dumps)
 - [Runtime](https://peekinside.dev/docs/runtime)
 - [Alerts](https://peekinside.dev/docs/alerts)
 - [Configuration](https://peekinside.dev/docs/configuration)

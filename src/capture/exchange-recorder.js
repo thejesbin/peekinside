@@ -11,7 +11,7 @@ import { randomUUID } from 'crypto';
 import http from 'http';
 import { performance } from 'perf_hooks';
 import { BodyDecoder, EMPTY_BODY } from './body-decoder.js';
-import { hasBody, parseQuery } from './http-message.js';
+import { hasBody, parseQuery, stringParams } from './http-message.js';
 import { RequestBodyTap } from './request-body-tap.js';
 import { ResponseTap } from './response-tap.js';
 
@@ -41,6 +41,10 @@ const kBodySource = Symbol('peekInside.bodySource');
  * @property {Array<{ id: string, name: string, message: string }>} [exceptions] - The first of them
  * @property {Object} [stats] - Timeline counters (queries, outgoing calls, logs), added by PeekInside
  * @property {Object} [timeline] - The request's timeline, when something was recorded on it
+ * @property {string} [route] - The route pattern it matched ("/users/:id"), when the framework says
+ * @property {string} [handler] - The code that handled it ("UsersController.findOne"), when known
+ * @property {Array<{ id: string, label: string|null, type: string, preview: string }>} [dumps] - The
+ *   dumps made during it (local dashboard only)
  */
 
 /**
@@ -249,15 +253,4 @@ export class ExchangeRecorder {
     }
     return decoder.decodeValue(parsed, headers);
   }
-}
-
-// Route parameters as strings (Express keeps them as strings; other routers may not).
-function stringParams(params) {
-  const result = {};
-  if (!params || typeof params !== 'object') return result;
-  for (const key of Object.keys(params)) {
-    const value = params[key];
-    if (value !== undefined && value !== null && typeof value !== 'object') result[key] = String(value);
-  }
-  return result;
 }

@@ -104,6 +104,7 @@ export class SpoolIngester {
     const exceptions = this.store.appendExceptions(payload.project.id, payload.exceptions).length;
     this.store.appendJobs(payload.project.id, payload.jobs);
     this.store.appendLogs(payload.project.id, payload.logs);
+    this.store.appendDumps(payload.project.id, payload.dumps);
     spool.remove(name);
     return { requests, exceptions };
   }

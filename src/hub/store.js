@@ -16,6 +16,7 @@ export const DEFAULT_MAX_REQUESTS = 1000;
 export const DEFAULT_MAX_EXCEPTIONS = 500;
 export const DEFAULT_MAX_JOBS = 2000;
 export const DEFAULT_MAX_LOGS = 10000;
+export const DEFAULT_MAX_DUMPS = 1000;
 
 /**
  * All projects on this machine.
@@ -204,6 +205,47 @@ export class Store {
   clearLogs(projectId) {
     const project = this.projects.get(projectId);
     if (project) project.clearLogs();
+  }
+
+  /**
+   * Stores new dumps of a project.
+   *
+   * @param {string} projectId
+   * @param {Object[]} records
+   * @returns {Object[]}
+   */
+  appendDumps(projectId, records) {
+    const project = this.projects.get(projectId);
+    return project && records.length ? project.appendDumps(records) : [];
+  }
+
+  /**
+   * @param {string} projectId
+   * @param {{ after?: number, before?: number, limit: number }} query
+   * @returns {{ dumps: Object[], hasMore: boolean }|null}
+   */
+  listDumps(projectId, query) {
+    const project = this.projects.get(projectId);
+    return project ? project.listDumps(query) : null;
+  }
+
+  /**
+   * @param {string} projectId
+   * @param {string} dumpId
+   * @returns {Object|null}
+   */
+  dumpDetail(projectId, dumpId) {
+    const project = this.projects.get(projectId);
+    return project ? project.dumpDetail(dumpId) : null;
+  }
+
+  /**
+   * @param {string} projectId
+   * @returns {void}
+   */
+  clearDumps(projectId) {
+    const project = this.projects.get(projectId);
+    if (project) project.clearDumps();
   }
 
   /**
@@ -398,7 +440,8 @@ export class Store {
       maxExceptions: this.maxExceptions,
       exceptionSegmentSize: this.exceptionSegmentSize,
       maxJobs: DEFAULT_MAX_JOBS,
-      maxLogs: DEFAULT_MAX_LOGS
+      maxLogs: DEFAULT_MAX_LOGS,
+      maxDumps: DEFAULT_MAX_DUMPS
     };
   }
 }
