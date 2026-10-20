@@ -1,8 +1,9 @@
 /**
  * Job runs from the common job libraries, without code changes: node-cron and cron (scheduled
- * tasks, with their cron expression, so PeekInside can tell when one misses its run) and BullMQ
+ * tasks, with their cron expression, so PeekInside can tell when one misses its run), BullMQ
  * (queue workers, with the queue, the attempt and the job's data, and the schedule of repeatable
- * jobs). Each run goes through JobRunner, exactly as PeekInside.job() would run it.
+ * jobs) and @nestjs/schedule (@Cron, @Interval and @Timeout methods, named after their class and
+ * method). Each run goes through JobRunner, exactly as PeekInside.job() would run it.
  *
  * A schedule is recorded with its time zone: the one given to the library, else the process's
  * own, which is the one these libraries read a cron expression in without one.
@@ -20,6 +21,10 @@ import { JobRunner } from '../jobs/job-runner.js';
 const kWrapped = Symbol('peekInside.job');
 // node-cron tasks created through named imports are found by looking again now and then.
 const RESCAN_MS = 30_000;
+// @nestjs/schedule's SchedulerType.
+const NEST_CRON = 1;
+const NEST_TIMEOUT = 2;
+const NEST_INTERVAL = 3;
 
 /**
  * Patches job libraries.
@@ -114,6 +119,67 @@ export class JobInstrumentation {
   }
 
   /**
+   * @nestjs/schedule: every @Cron, @Interval and @Timeout method runs as a job run, named after the
+   * name given to the decorator, else its class and method ("ReportsService.sendDigest"), with its
+   * schedule. The scheduler catches what a method throws and only logs it, so a failing method would
+   * otherwise look like one that ran fine: the run records the error, then the scheduler logs it as
+   * before. Methods are wrapped as the scheduler registers them, when the app initializes.
+   *
+   * @param {*} explorer - The ScheduleExplorer class, or the app's instance of it
+   * @returns {boolean}
+   */
+  static nestSchedule(explorer) {
+    const proto = typeof explorer === 'function' ? explorer.prototype : explorer && typeof explorer === 'object' ? Object.getPrototypeOf(explorer) : null;
+    if (!proto || typeof proto.wrapFunctionInTryCatchBlocks !== 'function') return false;
+    if (proto[kWrapped]) return true;
+    const original = proto.wrapFunctionInTryCatchBlocks;
+    proto.wrapFunctionInTryCatchBlocks = function (methodRef, instance) {
+      let job = null;
+      try {
+        job = typeof methodRef === 'function' ? nestJob(this, methodRef, instance) : null;
+      } catch (error) {
+        job = null;
+      }
+      if (!job) return original.apply(this, arguments);
+      const run = function () {
+        const args = arguments;
+        return JobRunner.run(job.name, () => methodRef.apply(this, args), job.options);
+      };
+      // cron fires the wrapper as a CronJob callback: it is a run already.
+      return JobInstrumentation.markRun(original.call(this, run, instance));
+    };
+    Object.defineProperty(proto, kWrapped, { value: true });
+    return true;
+  }
+
+  /**
+   * Whether a function records its own job runs (see markRun()).
+   *
+   * @param {*} fn
+   * @returns {boolean}
+   */
+  static isRun(fn) {
+    return typeof fn === 'function' && Boolean(fn[kWrapped]);
+  }
+
+  /**
+   * Marks a function that records its own job runs, so the cron patch doesn't record it again.
+   *
+   * @param {*} fn
+   * @returns {*} fn
+   */
+  static markRun(fn) {
+    if (typeof fn === 'function' && !fn[kWrapped]) {
+      try {
+        Object.defineProperty(fn, kWrapped, { value: true });
+      } catch (error) {
+        // A frozen function is recorded by both, which costs a run, never the job.
+      }
+    }
+    return fn;
+  }
+
+  /**
    * Patches the ES module build of a package installed in the project, when it has one.
    *
    * @param {string} packageDir - The package's folder
@@ -173,6 +239,31 @@ function wrapCronJobCallback(job, callback) {
   };
   wrapped[kWrapped] = true;
   return wrapped;
+}
+
+// What a @nestjs/schedule method runs as: its name, and its schedule from the decorator's
+// metadata (a cron expression, or "@every <ms>ms" for an interval; a timeout runs once).
+function nestJob(explorer, methodRef, instance) {
+  const metadata = explorer.metadataAccessor;
+  const read = (method) => (metadata && typeof metadata[method] === 'function' ? metadata[method](methodRef) : undefined);
+  const owner = instance && instance.constructor && typeof instance.constructor.name === 'string' ? instance.constructor.name : '';
+  const method = typeof methodRef.name === 'string' ? methodRef.name : '';
+  const fallback = owner && method ? `${owner}.${method}` : method || owner || 'job';
+  const named = (value) => (typeof value === 'string' && value.trim() ? value : fallback);
+  const type = read('getSchedulerType');
+  if (type === NEST_CRON) {
+    const cron = read('getCronMetadata') || {};
+    const schedule = typeof cron.cronTime === 'string' && cron.cronTime.trim() ? cron.cronTime : undefined;
+    const timezone = typeof cron.timeZone === 'string' && cron.timeZone ? cron.timeZone : schedule && cron.utcOffset === undefined ? localTimeZone() : undefined;
+    return { name: named(cron.name), options: { schedule, timezone, trigger: 'cron' } };
+  }
+  if (type === NEST_INTERVAL) {
+    const interval = read('getIntervalMetadata') || {};
+    const every = Number.isFinite(interval.timeout) && interval.timeout > 0 ? `@every ${interval.timeout}ms` : undefined;
+    return { name: named(read('getSchedulerName')), options: { schedule: every, trigger: 'cron' } };
+  }
+  if (type === NEST_TIMEOUT) return { name: named(read('getSchedulerName')), options: { trigger: 'cron' } };
+  return { name: fallback, options: { trigger: 'cron' } };
 }
 
 // The process's time zone (TZ, else the system's).

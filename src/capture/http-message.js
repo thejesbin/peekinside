@@ -136,3 +136,20 @@ export function hasBody(headers) {
 export function setOwn(target, key, value) {
   Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
 }
+
+/**
+ * Route parameters as strings, as records keep them: Express keeps them as strings, other routers
+ * (Fastify, Hono) may not. Values that are objects are left out.
+ *
+ * @param {*} params
+ * @returns {Object<string, string>}
+ */
+export function stringParams(params) {
+  const result = {};
+  if (!params || typeof params !== 'object') return result;
+  for (const key of Object.keys(params)) {
+    const value = params[key];
+    if (value !== undefined && value !== null && typeof value !== 'object') setOwn(result, key, String(value));
+  }
+  return result;
+}

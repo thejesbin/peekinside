@@ -2,7 +2,7 @@
  * The local hub's HTTP server, on 127.0.0.1 only.
  *
  *   GET    /                                   Dashboard page (also /p/<project id>, and its
- *                                              /exceptions, /routes, /queries, /logs, /jobs and /runtime)
+ *                                              /exceptions, /routes, /queries, /logs, /jobs, /dumps and /runtime)
  *   POST   /api/ingest                         Requests and exceptions from the SDK in each app, and
  *                                              counts of server requests it didn't record (free plan)
  *   GET    /api/status                         Hub version and settings
@@ -20,6 +20,9 @@
  *   GET    /api/projects/:id/logs              Log lines (their start), paged like requests
  *   GET    /api/projects/:id/logs/:lid         One log line in full
  *   DELETE /api/projects/:id/logs              Delete a project's log lines
+ *   GET    /api/projects/:id/dumps             Dumps (a preview of each value), paged like requests
+ *   GET    /api/projects/:id/dumps/:did        One dump's value
+ *   DELETE /api/projects/:id/dumps             Delete a project's dumps
  *   GET    /api/projects/:id/exception-state   Resolved issues, with a version
  *   PUT    /api/projects/:id/exception-state   Save them, if the version is still the current one
  *   DELETE /api/projects/:id                   Forget a project
@@ -38,7 +41,7 @@ import { readFileSync } from 'fs';
 import { HUB_API_VERSION, HUB_APP_ID } from '../config.js';
 import { ExceptionState } from './exception-state.js';
 import { IngestPayload, REQUEST_ID } from './ingest-payload.js';
-import { PROJECT_ID } from './store.js';
+import { DEFAULT_MAX_DUMPS, PROJECT_ID } from './store.js';
 
 const MAX_INGEST_BYTES = 32 * 1024 * 1024;
 // 5000 fingerprints with their timestamps take about 200 KB.
@@ -46,9 +49,9 @@ const MAX_STATE_BYTES = 1024 * 1024;
 const DEFAULT_PAGE = 500;
 const MAX_PAGE = 1000;
 // /api/projects/:id, then optionally a collection and an item.
-const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(?:\/(requests|exceptions|exception-state|runtime|jobs|logs)(?:\/([^/]+))?)?$/;
+const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(?:\/(requests|exceptions|exception-state|runtime|jobs|logs|dumps)(?:\/([^/]+))?)?$/;
 // The dashboard page: the project list, a project's requests, its exceptions and its queries.
-const SHELL_ROUTE = /^\/p\/[a-z0-9-]{1,64}(?:\/(?:exceptions|routes|queries|runtime|logs|jobs))?\/?$/;
+const SHELL_ROUTE = /^\/p\/[a-z0-9-]{1,64}(?:\/(?:exceptions|routes|queries|runtime|logs|jobs|dumps))?\/?$/;
 
 const BASE_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -150,7 +153,9 @@ export class HubServer {
       dataDir: this.dataDir,
       siteUrl: this.siteUrl,
       maxRequests: this.store.maxRequests,
-      maxExceptions: this.store.maxExceptions
+      maxExceptions: this.store.maxExceptions,
+      // Also tells the dashboard this hub keeps dumps (older ones don't).
+      maxDumps: DEFAULT_MAX_DUMPS
     };
   }
 
@@ -243,6 +248,7 @@ export class HubServer {
     this.store.addSamples(payload.project.id, payload.instance, payload.samples);
     const addedJobs = this.store.appendJobs(payload.project.id, payload.jobs);
     const addedLogs = this.store.appendLogs(payload.project.id, payload.logs);
+    const addedDumps = this.store.appendDumps(payload.project.id, payload.dumps);
     // SDKs from before exceptions get the answer they know.
     return sendJson(res, 200, payload.hasExceptions
       ? {
@@ -251,9 +257,10 @@ export class HubServer {
         acceptedExceptions: addedExceptions.length,
         rejectedExceptions: payload.rejectedExceptions,
         acceptedJobs: addedJobs.length,
-        acceptedLogs: addedLogs.length
+        acceptedLogs: addedLogs.length,
+        acceptedDumps: addedDumps.length
       }
-      : { accepted: added.length, rejected: payload.rejected, acceptedJobs: addedJobs.length, acceptedLogs: addedLogs.length });
+      : { accepted: added.length, rejected: payload.rejected, acceptedJobs: addedJobs.length, acceptedLogs: addedLogs.length, acceptedDumps: addedDumps.length });
   }
 
   // Every /api/ route except ingest; the caller has checked the origin.
@@ -298,6 +305,10 @@ export class HubServer {
     if (collection === 'logs') {
       if (item !== undefined) return this._item(req, res, decode(item), (id) => this.store.logDetail(projectId, id), 'This log line is no longer stored.');
       return this._collection(req, res, query, () => this.store.listLogs(projectId, pageOf(query)), () => this.store.clearLogs(projectId));
+    }
+    if (collection === 'dumps') {
+      if (item !== undefined) return this._item(req, res, decode(item), (id) => this.store.dumpDetail(projectId, id), 'This dump is no longer stored.');
+      return this._collection(req, res, query, () => this.store.listDumps(projectId, pageOf(query)), () => this.store.clearDumps(projectId));
     }
     if (collection === 'runtime') {
       if (item !== undefined) return sendJson(res, 404, { error: 'Not found' });

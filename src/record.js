@@ -32,8 +32,9 @@ export class RequestRecord {
    *   lists the first of them)
    * @param {Object} [fields.stats] - Timeline counters: queries, queryTime, slowQueries, nPlusOne,
    *   duplicates, http, httpTime, logs (detail.timeline holds the spans); absent when the timeline is off
-   * @param {{ url: string, path: string, contentType: string, user?: Object }} fields.summary - Shown in
-   *   the request list (with the user, when the app set one)
+   * @param {{ url: string, path: string, contentType: string, route?: string, handler?: string, user?: Object }} fields.summary -
+   *   Shown in the request list: with the route pattern and the handler when the framework says
+   *   (NestJS, Hono, Fastify), and the user when the app set one
    * @param {Object} fields.detail - Everything else: headers, bodies, query, client details
    */
   constructor({ id, occurredAt, environment, release = null, method, status, duration, requestSize, responseSize, aborted, exceptionCount = 0, stats, summary, detail }) {
@@ -83,6 +84,8 @@ export class RequestRecord {
         url: exchange.url,
         path: exchange.path,
         contentType: headerValue(response.headers, 'content-type'),
+        ...(exchange.route ? { route: exchange.route } : {}),
+        ...(exchange.handler ? { handler: exchange.handler } : {}),
         ...(exchange.user ? { user: exchange.user } : {})
       },
       detail: {
@@ -106,6 +109,7 @@ export class RequestRecord {
           bodyEncoding: response.bodyEncoding
         },
         exceptions: Array.isArray(exchange.exceptions) ? exchange.exceptions.slice(0, MAX_EXCEPTION_LINKS) : [],
+        ...(Array.isArray(exchange.dumps) && exchange.dumps.length ? { dumps: exchange.dumps } : {}),
         ...(exchange.timeline ? { timeline: exchange.timeline } : {})
       }
     });

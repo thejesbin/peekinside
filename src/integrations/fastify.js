@@ -10,6 +10,7 @@ import { FrameworkAdapter } from './framework-adapter.js';
  * Records requests from a Fastify onRequest hook, and errors from an onError hook.
  *
  * onRequest runs before Fastify reads the body, so bodies are captured as Fastify parses them.
+ * It runs once Fastify has routed the request, so the route pattern and parameters are known.
  * Hooks must be added before the app is ready, so attach before fastify.listen().
  */
 export class FastifyAdapter extends FrameworkAdapter {
@@ -36,7 +37,10 @@ export class FastifyAdapter extends FrameworkAdapter {
   attach(fastify) {
     fastify.addHook('onRequest', (request, reply, done) => {
       ExchangeRecorder.setBodySource(request.raw, () => request.body);
-      this.peekInside._intercept(request.raw, reply.raw, done, 'fastify');
+      this.peekInside._intercept(request.raw, reply.raw, () => {
+        FastifyAdapter._noteRoute(request);
+        done();
+      }, 'fastify');
     });
     if (this.peekInside.options.captureExceptions !== false) {
       fastify.addHook('onError', (request, reply, error, done) => {
@@ -46,6 +50,19 @@ export class FastifyAdapter extends FrameworkAdapter {
     }
     if (fastify.server) {
       this.servers.bind(fastify.server);
+    }
+  }
+
+  // The route Fastify matched (routerPath before Fastify 4.10); parameters stay on its request.
+  static _noteRoute(request) {
+    try {
+      const context = RequestContext.of(request.raw);
+      if (!context) return;
+      const options = request.routeOptions;
+      const route = options && typeof options === 'object' ? options.url : request.routerPath;
+      context.noteRoute({ route: typeof route === 'string' ? route : null, params: () => request.params });
+    } catch (error) {
+      // The request is recorded without them.
     }
   }
 

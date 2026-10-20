@@ -13,6 +13,7 @@
 import { LOG_PREFIX } from '../config.js';
 import { ExceptionRecord } from '../exceptions/exception-record.js';
 import { RequestContext } from '../exceptions/request-context.js';
+import { DumpRecord } from '../dumps/dump-record.js';
 import { JobRunRecord } from '../jobs/job-run-record.js';
 import { LogRecord } from '../logs/log-record.js';
 import { RequestRecord } from '../record.js';
@@ -170,13 +171,15 @@ export class BatchTransport {
     const exceptions = [];
     const jobs = [];
     const logs = [];
+    const dumps = [];
     for (const record of records) {
       if (record instanceof ExceptionRecord) exceptions.push(record);
       else if (record instanceof JobRunRecord) jobs.push(record);
       else if (record instanceof LogRecord) logs.push(record);
+      else if (record instanceof DumpRecord) dumps.push(record);
       else requests.push(record);
     }
-    return { requests, exceptions, jobs, logs };
+    return { requests, exceptions, jobs, logs, dumps };
   }
 
   /**

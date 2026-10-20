@@ -94,12 +94,13 @@ function exceptionFor(result, message) {
   return result.exceptions.find((exception) => exception.message === message);
 }
 
-// The request it happened in has its id, counts it and lists it.
-function assertLinked(result, exception, url) {
+// The request it happened in has its id, counts it and lists it (with its route, when the framework
+// names it).
+function assertLinked(result, exception, url, route = null) {
   const request = requestFor(result, url);
   assert.ok(request, `request ${url} is stored`);
   assert.equal(exception.requestId, request.id, `${exception.message} is linked to ${url}`);
-  assert.deepEqual(exception.request, { method: 'GET', path: url.split('?')[0] });
+  assert.deepEqual(exception.request, { method: 'GET', path: url.split('?')[0], ...(route ? { route } : {}) });
   assert.ok(request.exceptionCount >= 1);
   const detail = store.detail(result.project.id, request.id);
   assert.ok(detail.exceptions.some((link) => link.id === exception.id && link.name === exception.name && link.message === exception.message));
@@ -369,11 +370,13 @@ test('Fastify: errors from the onError hook, handled when the app has its own er
       const boom = exceptionFor(result, 'fastify failure');
       assert.equal(boom.mechanism, 'fastify');
       assert.equal(boom.handled, customHandler);
-      assertLinked(result, boom, '/boom');
+      assertLinked(result, boom, '/boom', '/boom');
+      assert.equal(requestFor(result, '/boom').route, '/boom', 'the route Fastify matched');
       assert.equal(result.exceptions.filter((item) => item.message.includes('body')).length, 0, 'a 400 validation error is not recorded');
       const report = result.exceptions.find((item) => item.id === reported.id);
       assert.equal(report.message, 'fastify report 1');
       assert.equal(report.requestId, result.requests[2].id);
+      assert.equal(result.requests[2].route, '/report');
     } finally {
       peekInside.stop();
       await fastify.close();

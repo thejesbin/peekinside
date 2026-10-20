@@ -1,12 +1,18 @@
 /**
- * Lines written with pino and winston, like console lines: on the timeline of the request (or job
- * run) they belong to, and on the Logs page. Only lines the logger actually writes are recorded
- * (a level it has turned off is skipped), and what the logger writes is untouched.
+ * Lines written with pino, winston and NestJS's Logger, like console lines: on the timeline of the
+ * request (or job run) they belong to, and on the Logs page. Only lines the logger actually writes
+ * are recorded (a level it has turned off is skipped), and what the logger writes is untouched.
  *
- * Both are patched on a prototype every logger shares, so loggers created before PeekInside, child
+ * Each is patched on a prototype every logger shares, so loggers created before PeekInside, child
  * loggers and loggers imported as ES modules are all covered.
+ *
+ * Nest's default logger (ConsoleLogger) writes to process.stdout itself, past the console. Its
+ * lines keep the class that wrote them ("[OrdersService] Charging card"), and the redaction the
+ * app set up applies to them too. Nest's own startup lines (modules loaded, routes mapped) are
+ * left out; its warnings and errors are not.
  */
 
+import { inspect } from 'util';
 import { LogCapture } from '../logs/log-capture.js';
 import { Timeline } from '../timeline/timeline.js';
 
@@ -16,6 +22,10 @@ const PINO_LEVELS = { trace: 'debug', debug: 'debug', info: 'info', warn: 'warn'
 const WINSTON_LEVELS = { error: 'error', warn: 'warn', info: 'info', http: 'info', verbose: 'debug', debug: 'debug', silly: 'debug' };
 // Keys of a winston `info` that aren't the line's own data.
 const WINSTON_OWN = new Set(['level', 'message', 'timestamp', 'splat']);
+const NEST_LEVELS = { log: 'info', error: 'error', warn: 'warn', debug: 'debug', verbose: 'debug', fatal: 'error' };
+// Nest's own classes that log while the app starts: their info lines are startup noise.
+const NEST_STARTUP = new Set(['NestFactory', 'InstanceLoader', 'RoutesResolver', 'RouterExplorer', 'NestApplication', 'NestMicroservice', 'WebSocketsController']);
+const INSPECT = { depth: 4, breakLength: Infinity, compact: true };
 
 /**
  * Patches logging libraries.
@@ -88,6 +98,70 @@ export class LoggerInstrumentation {
     Object.defineProperty(proto, kPatched, { value: true });
     return true;
   }
+
+  /**
+   * Patches NestJS's ConsoleLogger, the logger behind Nest's Logger unless the app set its own:
+   * every line goes through printMessages(), after the level check.
+   *
+   * @param {*} target - A ConsoleLogger (or subclass) instance or class
+   * @returns {boolean} Whether it is (now) patched
+   */
+  static nest(target) {
+    let proto = typeof target === 'function' ? target.prototype : target;
+    while (proto && !(Object.prototype.hasOwnProperty.call(proto, 'printMessages') && typeof proto.formatPid === 'function')) {
+      proto = Object.getPrototypeOf(proto);
+    }
+    if (!proto || typeof proto.printMessages !== 'function') return false;
+    if (proto[kPatched]) return true;
+    const original = proto.printMessages;
+    proto.printMessages = function (messages) {
+      const args = Array.prototype.slice.call(arguments);
+      try {
+        // Nest 12 resolves lazy messages (functions) while printing: they are resolved once here,
+        // and the logger prints the values.
+        if (Array.isArray(messages) && typeof this.resolveMessage === 'function') {
+          args[0] = messages.map((message) => (typeof message === 'function' ? this.resolveMessage(message) : message));
+        }
+        nestLine(this, args[0], args[1], args[2], args[4], args[5]);
+      } catch (error) {
+        // The line is written all the same.
+      }
+      return original.apply(this, args);
+    };
+    Object.defineProperty(proto, kPatched, { value: true });
+    return true;
+  }
+}
+
+// One call of ConsoleLogger#printMessages(messages, context, logLevel, writeStreamType, errorStack,
+// params): a line per message, as Nest prints them.
+function nestLine(logger, messages, context, logLevel, errorStack, params) {
+  // With forceConsole, Nest prints through the console, which records the lines.
+  if (!Array.isArray(messages) || (logger.options && logger.options.forceConsole)) return;
+  const level = NEST_LEVELS[logLevel] || 'info';
+  const where = typeof context === 'string' ? context : '';
+  if (NEST_STARTUP.has(where) && (level === 'info' || level === 'debug')) return;
+  const timeline = Timeline.current();
+  if (!(timeline && timeline.settings.captureLogs) && !LogCapture.wants(level)) return;
+
+  const redact = logger.redactor && typeof logger.redact === 'function' ? (value) => logger.redact(value) : (value) => value;
+  const fields = {};
+  if (params && typeof params === 'object') Object.assign(fields, redact(params));
+  if (where) fields.context = where;
+  if (typeof errorStack === 'string' && errorStack) fields.stack = errorStack;
+  for (const message of messages) {
+    if (typeof message === 'function') continue;
+    const value = redact(message);
+    const own = value instanceof Error ? { ...fields, err: errorFields(value), ...(fields.stack ? {} : { stack: String(value.stack || '') }) } : fields;
+    const text = nestText(value);
+    capture(level, where ? `[${where}] ${text}` : text, Object.keys(own).length ? own : undefined, 'nest');
+  }
+}
+
+function nestText(value) {
+  if (typeof value === 'string') return value;
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  return inspect(value, INSPECT);
 }
 
 function capture(level, message, fields, source) {

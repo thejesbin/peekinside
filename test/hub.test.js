@@ -89,7 +89,7 @@ test('ingest accepts SDK batches and skips malformed records', async () => {
     body: { project: PROJECT, instance: INSTANCE, requests: [RECORD, { ...RECORD, id: '../../etc', method: 'GET' }, { ...RECORD, id: 'x2', status: 999 }] }
   });
   assert.equal(response.status, 200);
-  assert.deepEqual(response.json, { accepted: 1, rejected: 2, acceptedJobs: 0, acceptedLogs: 0 });
+  assert.deepEqual(response.json, { accepted: 1, rejected: 2, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0 });
 
   const projects = await request('GET', '/api/projects');
   assert.equal(projects.json.projects[0].name, 'orders-api');

@@ -1,7 +1,7 @@
 /**
- * Log lines for the Logs page: what the app writes with the console, pino or winston, inside a
- * request, inside a job run, or anywhere else (startup, timers), each linked to its request or job
- * run when there is one.
+ * Log lines for the Logs page: what the app writes with the console, pino, winston or NestJS's
+ * Logger, inside a request, inside a job run, or anywhere else (startup, timers), each linked to
+ * its request or job run when there is one.
  *
  * Lines are rate limited per process (100 a second, bursts of 500) and below the `logLevel` option
  * are left out, so an app that logs heavily costs a bounded amount. PeekInside's own lines are
@@ -67,8 +67,8 @@ export class LogCapture {
    * @param {'debug'|'info'|'warn'|'error'} level
    * @param {string} message - As written (formatted)
    * @param {Object} [options]
-   * @param {'console'|'pino'|'winston'} [options.source='console']
-   * @param {*} [options.fields] - Structured data written with the line (pino, winston)
+   * @param {'console'|'pino'|'winston'|'nest'} [options.source='console']
+   * @param {*} [options.fields] - Structured data written with the line (pino, winston, nest)
    * @returns {string|null} The record's id, or null when nothing was recorded
    */
   static record(level, message, { source = 'console', fields } = {}) {
