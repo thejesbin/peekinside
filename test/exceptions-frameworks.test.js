@@ -334,6 +334,56 @@ test('Koa: errors propagating out of the middleware, without changing the answer
   }
 });
 
+test('Koa: errors the app answers are handled, wherever PeekInside sits among its middleware', async () => {
+  const name = 'koa-handled';
+  const app = new Koa();
+  app.silent = true;
+  const reported = [];
+  app.on('error', (error) => reported.push(error.message));
+  // The app's error handler first, PeekInside after it: errors pass through PeekInside on their way out.
+  app.use(async (ctx, next) => {
+    try {
+      await next();
+    } catch (error) {
+      ctx.status = 503;
+      ctx.body = { error: error.message };
+    }
+  });
+  const peekInside = attach(app, name);
+  // An error handler after PeekInside, reporting what it answers, as Koa suggests.
+  app.use(async (ctx, next) => {
+    try {
+      await next();
+    } catch (error) {
+      if (ctx.path !== '/reported') throw error;
+      ctx.status = 502;
+      ctx.body = { error: 'upstream' };
+      ctx.app.emit('error', error, ctx);
+    }
+  });
+  app.use((ctx) => {
+    if (ctx.path === '/outer') throw new Error('answered outside PeekInside');
+    if (ctx.path === '/reported') throw new Error('answered and reported');
+    ctx.body = { ok: true };
+  });
+  const server = app.listen(0, '127.0.0.1');
+  try {
+    const port = await listen(server);
+    assert.equal((await send(port, 'GET', '/outer')).status, 503);
+    assert.equal((await send(port, 'GET', '/reported')).status, 502);
+    assert.deepEqual(reported, ['answered and reported'], "the app's own listener still gets its events");
+
+    const result = await stored(peekInside, name, (state) => state.requests.length === 2 && state.exceptions.length === 2);
+    assert.equal(exceptionFor(result, 'answered outside PeekInside').handled, true);
+    assert.equal(exceptionFor(result, 'answered and reported').handled, true);
+    assert.equal(exceptionFor(result, 'answered and reported').mechanism, 'koa');
+    assert.equal(requestFor(result, '/outer').status, 503);
+  } finally {
+    peekInside.stop();
+    server.close();
+  }
+});
+
 test('Fastify: errors from the onError hook, handled when the app has its own error handler', async () => {
   const build = (withPeek, name, customHandler) => {
     const fastify = Fastify();

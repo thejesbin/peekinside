@@ -6,13 +6,23 @@ import { ExchangeRecorder } from '../capture/exchange-recorder.js';
 import { RequestContext } from '../exceptions/request-context.js';
 import { FrameworkAdapter } from './framework-adapter.js';
 
+const kErrorHooks = Symbol('peekInside.koaErrors');
+
 /**
- * Records requests through a Koa middleware, and the errors that propagate out of the middleware
- * after it.
+ * Records requests through a Koa middleware, and the errors the app runs into, without changing
+ * how either is answered.
  *
- * Errors are seen by catching around `await next()` and rethrowing them unchanged, so Koa still
- * answers them and still emits 'error' (which logs them when the app has no listener). No 'error'
- * listener is added: Koa only logs errors itself while the app has none.
+ * Errors are seen in three places, so where PeekInside sits among the app's middleware doesn't
+ * matter:
+ *
+ * - Around `await next()` in PeekInside's middleware, for errors thrown after it, rethrown
+ *   unchanged. Such an error stays open: the app's own error-handling middleware (registered
+ *   before PeekInside's) may still answer it, which makes it handled.
+ * - In Koa's default handler, `ctx.onerror()`, which answers 500: an error that reaches it is
+ *   unhandled.
+ * - In `app.emit('error', err, ctx)`, which error-handling middleware calls to report an error it
+ *   answered, as Koa suggests: handled. emit() is observed, not listened to: Koa only logs errors
+ *   itself while the app has no 'error' listener, so none is added.
  */
 export class KoaAdapter extends FrameworkAdapter {
   static framework = 'koa';
@@ -30,13 +40,13 @@ export class KoaAdapter extends FrameworkAdapter {
    * Body parsers for Koa keep the parsed body on ctx.request, not on the Node request, so the
    * recorder is told where to look in case a parser read the body first.
    *
-   * Errors are recorded as unhandled: Koa's default handler answers them, unless middleware
-   * registered before this one catches them, so attach PeekInside before your own error handler.
+   * Used on its own (koaMiddleware()), it hooks into the app's error handling on the first request.
    *
    * @returns {Function} Koa middleware `(ctx, next)`
    */
   middleware() {
     return (ctx, next) => {
+      if (this.peekInside.options.captureExceptions !== false) KoaAdapter._hookErrors(ctx.app);
       ExchangeRecorder.setBodySource(ctx.req, () => ctx.request.body);
       return this.peekInside._intercept(ctx.req, ctx.res, () => KoaAdapter._next(ctx, next), 'koa');
     };
@@ -50,6 +60,7 @@ export class KoaAdapter extends FrameworkAdapter {
    */
   attach(app) {
     app.use(this.middleware());
+    if (this.peekInside.options.captureExceptions !== false) KoaAdapter._hookErrors(app);
     this.servers.patchListen(app);
   }
 
@@ -58,15 +69,46 @@ export class KoaAdapter extends FrameworkAdapter {
     try {
       await next();
     } catch (error) {
-      try {
-        const context = RequestContext.of(ctx.req);
-        if (context && context.capture) {
-          context.capture.frameworkError(context, error, { mechanism: 'koa', handled: false });
-        }
-      } catch (failure) {
-        // Recording must never change the error the app sees.
-      }
+      KoaAdapter._noteError(ctx.req, error, true);
       throw error;
+    }
+  }
+
+  // Watches the app's default error handler and its 'error' events, once per app.
+  static _hookErrors(app) {
+    try {
+      if (!app || app[kErrorHooks]) return;
+      Object.defineProperty(app, kErrorHooks, { value: true });
+      const context = app.context;
+      if (context && typeof context.onerror === 'function') {
+        const onerror = context.onerror;
+        context.onerror = function (error) {
+          // Only the errors it answers: after the response started, it can only log them.
+          if (error != null && !this.headerSent && this.writable) KoaAdapter._noteError(this.req, error, false);
+          return onerror.apply(this, arguments);
+        };
+      }
+      if (typeof app.emit === 'function') {
+        const emit = app.emit;
+        app.emit = function (event, error, ctx) {
+          if (event === 'error' && error != null && ctx && ctx.req) KoaAdapter._noteError(ctx.req, error, true);
+          return emit.apply(this, arguments);
+        };
+      }
+    } catch (error) {
+      // An app that doesn't fit is recorded from the middleware alone.
+    }
+  }
+
+  // An error the app may still answer stays open; one Koa's default handler answers is final.
+  static _noteError(req, error, handled) {
+    try {
+      const context = RequestContext.of(req);
+      if (context && context.capture) {
+        context.capture.frameworkError(context, error, { mechanism: 'koa', handled, open: handled });
+      }
+    } catch (failure) {
+      // Recording must never change the error the app sees.
     }
   }
 }
