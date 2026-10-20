@@ -1,0 +1,13 @@
+{
+  // Apps built with a bundler or tsx (Vite, esbuild, Next.js): ES modules only.
+  "compilerOptions": {
+    "strict": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["*.ts"]
+}

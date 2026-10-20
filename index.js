@@ -1,3 +1,3 @@
-import FluxManager from './src/FluxManager.js';
+import PeekInside from './src/PeekInside.js';
 
-export default FluxManager;
+export default PeekInside;

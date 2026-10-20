@@ -1,0 +1,7 @@
+<svg preserveAspectRatio="none" overflow="visible" style="display: block;" width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Stacked mark / 48">
+<path id="Parent request span" d="M3.75 9.75H30.75C33.1369 9.75 35.4261 10.6982 37.114 12.386C38.8018 14.0739 39.75 16.3631 39.75 18.75V29.25C39.75 31.6369 38.8018 33.9261 37.114 35.614C35.4261 37.3018 33.1369 38.25 30.75 38.25H44.25" stroke="#EEF0EC" stroke-width="5" stroke-linecap="square" stroke-linejoin="round"/>
+<path id="Child execution span" d="M10.5 17.25H28.5C29.6935 17.25 30.8381 17.7241 31.682 18.568C32.5259 19.4119 33 20.5565 33 21.75V26.25C33 27.4435 32.5259 28.5881 31.682 29.432C30.8381 30.2759 29.6935 30.75 28.5 30.75H21.75" stroke="#EEF0EC" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
+<path id="Measured core" d="M17.25 24H27" stroke="#46C5AF" stroke-width="4" stroke-linecap="square" stroke-linejoin="round"/>
+</g>
+</svg>

@@ -1,210 +1,100 @@
-# 🚀 Flux Manager
+<h1 align="center">
+  <a href="https://www.peekinside.dev">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/thejesbin/peekinside/HEAD/.github/assets/peekinside-span-core-lockup-dark.svg">
+      <img src="https://raw.githubusercontent.com/thejesbin/peekinside/HEAD/.github/assets/peekinside-span-core-lockup-light.svg" alt="PeekInside" width="280">
+    </picture>
+  </a>
+</h1>
 
-> A powerful, framework-agnostic Node.js debugging tool for real-time HTTP request monitoring
+<p align="center">
+  <strong>Debug Node.js from the inside.</strong><br>
+  Every error with the request that set it off, the queries and calls it made, what it logged and your code around the line that threw.
+</p>
 
-![Flux Manager](https://img.shields.io/badge/Flux-Manager-9333ea?style=for-the-badge&logo=node.js&logoColor=white)
-![Version](https://img.shields.io/badge/version-1.0.0-9333ea?style=for-the-badge)
-![License](https://img.shields.io/badge/license-MIT-9333ea?style=for-the-badge)
-![Node](https://img.shields.io/badge/node-%3E%3D14.0.0-9333ea?style=for-the-badge)
-![ES6](https://img.shields.io/badge/ES6-modules-9333ea?style=for-the-badge)
+<p align="center">
+  <a href="https://www.npmjs.com/package/peekinside"><img src="https://img.shields.io/npm/v/peekinside?color=18b69b" alt="npm version"></a>
+  <a href="https://github.com/thejesbin/peekinside/blob/HEAD/LICENSE"><img src="https://img.shields.io/badge/license-MIT-18b69b" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/node-%3E%3D18-18b69b" alt="Node.js 18 or later">
+  <img src="https://img.shields.io/badge/types-included-18b69b" alt="TypeScript types included">
+</p>
 
-Flux Manager is a comprehensive Node.js application monitoring and debugging platform. It provides real-time HTTP request tracking, supporting **any Node.js HTTP framework** including Express, Koa, Fastify, and native HTTP servers.
+<p align="center">
+  <a href="https://www.peekinside.dev/docs/quick-start">Quick start</a> ·
+  <a href="https://www.peekinside.dev/docs">Documentation</a> ·
+  <a href="https://www.peekinside.dev/guides/laravel-telescope-for-nodejs">Coming from Laravel Telescope?</a> ·
+  <a href="https://www.peekinside.dev">peekinside.dev</a>
+</p>
 
+![The PeekInside dashboard: an unhandled TypeError, the user it happened to and the code around the line that threw](https://raw.githubusercontent.com/thejesbin/peekinside/HEAD/.github/assets/dashboard.png)
 
-## 📦 Installation
+PeekInside records what your app does with each request (the response, the exception, the database queries, the outgoing calls and the log lines) and what your background jobs do, and shows it in a dashboard: free on your machine while you develop, and encrypted end to end on PeekInside Cloud for your servers.
+
+If you know Laravel Telescope, this is Telescope for Node.js: requests, exceptions, queries with N+1 detection, outgoing HTTP calls, logs, jobs and dumps, for Express, NestJS, Fastify, Koa and Hono.
+
+## Quick start
 
 ```bash
-npm install flux-manager
+npm install peekinside
 ```
-
-## 🚀 Quick Start
-
-### ✨ Ultra-Simple Integration (One Line!)
 
 ```javascript
 import express from 'express';
-import FluxManager from 'flux-manager';
+import PeekInside from 'peekinside';
 
 const app = express();
-
-// 🎯 ONE LINE SETUP - Auto-detects framework and integrates!
-const fluxManager = FluxManager.attach(app, {
-  route: '/flux-manager',
-  port: 3000,         
-  maxRequests: 1000
-});
-
-// Your application runs on port 3000
-app.listen(3000, () => {
-  console.log('✅ Your app: http://localhost:3000');
-  console.log('🔍 FluxManager dashboard: http://localhost:3000/flux-manager');
-});
-
+PeekInside.attach(app);
 ```
 
-### Koa.js Integration
+Start your app as usual. PeekInside prints the link to its dashboard:
 
-```javascript
-import Koa from 'koa';
-import FluxManager from 'flux-manager';
-
-const app = new Koa();
-
-// Auto-attach to Koa
-const fluxManager = FluxManager.attach(app, { route: '/flux-manager' });
-
-app.listen(3000);
+```text
+[peekinside] Requests from orders-api: http://localhost:7335/p/orders-api-1a2b3c4d
 ```
 
-### Fastify Integration
+Open it and use your app: requests show up as they happen. To check the setup before anything breaks on its own, `npx peekinside test` sends a test error from your project.
 
-```javascript
-import Fastify from 'fastify';
-import FluxManager from 'flux-manager';
+## Frameworks
 
-const fastify = Fastify();
+`PeekInside.attach()` takes the app or server you already have:
 
-// Auto-attach to Fastify
-const fluxManager = FluxManager.attach(fastify, { route: '/flux-manager' });
+| Framework | Attach | Notes |
+| --- | --- | --- |
+| [Express](https://www.peekinside.dev/frameworks/express) 4 and 5 | `PeekInside.attach(app)` | Bodies are captured whether `express.json()` runs before it or after |
+| [NestJS](https://www.peekinside.dev/frameworks/nestjs) 10 and later | `PeekInside.attach(app)` | Before `app.listen()`, on Express or Fastify |
+| [Fastify](https://www.peekinside.dev/frameworks/fastify) | `PeekInside.attach(fastify)` | Before `fastify.listen()` |
+| [Koa](https://www.peekinside.dev/frameworks/koa) | `PeekInside.attach(app)` | |
+| [Hono](https://www.peekinside.dev/frameworks/hono) | `PeekInside.attach(app)` | Before `serve()`, on Node.js with `@hono/node-server` |
+| `node:http` | `PeekInside.attach(server)` | Any `http.Server` |
 
-fastify.listen({ port: 3000 });
-```
+## What it records
 
-### Native HTTP Server
+- **Requests and responses:** headers, query, route parameters, bodies, status and duration, with the route that matched.
+- **Exceptions:** stack traces with your source lines around each frame (TypeScript through source maps), grouped into issues, handled told apart from unhandled. Crashes too, with the request they happened in.
+- **Database queries:** pg, mysql2, Prisma, MongoDB and Mongoose, and the ORMs on top of them (Knex, Sequelize, TypeORM, Drizzle, Kysely), with slow queries and [N+1 loops](https://www.peekinside.dev/guides/nodejs-n-plus-one-queries) flagged.
+- **Outgoing HTTP calls:** through `node:http` (axios, got and the rest) and `fetch`.
+- **Logs:** from the console, pino, winston and NestJS's Logger, on the timeline of the request that wrote them.
+- **Jobs:** node-cron, cron, BullMQ and `@nestjs/schedule`, or your own with `PeekInside.job()`. A scheduled job that misses its run is flagged.
+- **Dumps:** `PeekInside.dump(value)` shows a value in the dashboard instead of your terminal, as a tree you can open, under the request it belongs to.
+- **Runtime:** memory, CPU and event-loop delay over time, and the requests in flight when the event loop was blocked.
+- **Who and which deploy:** the user each request was for (`PeekInside.setUser()`) and the release each error came from.
 
-```javascript
-import http from 'http';
-import FluxManager from 'flux-manager';
+## On your machine, and on your servers
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('Hello World!');
-});
+**The local dashboard** is free, needs no account, and keeps what it records on your machine. The first app that needs it starts it in the background, and every app on your machine that uses PeekInside shows up in it as a project. It's for development: it's off when `NODE_ENV` is `production`.
 
-// Auto-attach to HTTP server
-const fluxManager = FluxManager.attach(server, { route: '/flux-manager' });
+**[PeekInside Cloud](https://www.peekinside.dev/docs/cloud)** is the same dashboard for your servers and your team. Set `PEEKINSIDE_API_KEY` on a server and the same `PeekInside.attach()` sends there. What it sends is encrypted on your server and decrypted in your browser, so PeekInside Cloud only ever stores ciphertext. With Pro and up, alerts reach you by email or Slack. No card is needed to start: see [pricing](https://www.peekinside.dev/#pricing).
 
-server.listen(3000);
-```
+## Documentation
 
+Everything else is at **[peekinside.dev/docs](https://www.peekinside.dev/docs)**.
 
-### **📍 Access Points:**
+**Docs:** [Quick start](https://www.peekinside.dev/docs/quick-start) · [Local dashboard](https://www.peekinside.dev/docs/local-dashboard) · [PeekInside Cloud](https://www.peekinside.dev/docs/cloud) · [Security](https://www.peekinside.dev/docs/security) · [Exceptions](https://www.peekinside.dev/docs/exceptions) · [Timeline and queries](https://www.peekinside.dev/docs/timeline) · [Routes](https://www.peekinside.dev/docs/routes) · [Logs](https://www.peekinside.dev/docs/logs) · [Jobs and schedules](https://www.peekinside.dev/docs/jobs) · [Dumps](https://www.peekinside.dev/docs/dumps) · [Runtime](https://www.peekinside.dev/docs/runtime) · [Alerts](https://www.peekinside.dev/docs/alerts) · [Configuration](https://www.peekinside.dev/docs/configuration) · [API](https://www.peekinside.dev/docs/api)
 
-| Service | URL | Purpose |
-|---------|-----|----------|
-| **Your Application** | `http://localhost:3000` | Your main app, API endpoints, web pages |
-| **FluxManager Dashboard** | `http://localhost:3000/flux-manager` | Monitoring dashboard, request inspection |
-| **WebSocket Connection** | `ws://localhost:3000/flux-manager/ws` | Real-time updates for dashboard |
+**Guides:** [Laravel Telescope for Node.js](https://www.peekinside.dev/guides/laravel-telescope-for-nodejs) · [Node.js debugging tools](https://www.peekinside.dev/guides/nodejs-debugging-tools) · [Finding N+1 queries in Node.js](https://www.peekinside.dev/guides/nodejs-n-plus-one-queries)
 
-### **⚙️ Port Configuration Options:**
+Found a bug or have a question? [Open an issue](https://github.com/thejesbin/peekinside/issues).
 
-```javascript
-// Option 1: Same port (Recommended - Simple Setup)
-const fluxManager = FluxManager.attach(app, {
-  port: 3000,     // FluxManager uses same port as your app
-  route: '/flux-manager'
-});
-app.listen(3000);
-// Access: http://localhost:3000/flux-manager
+## License
 
-// Option 2: Separate ports (Advanced - Better Isolation)
-const fluxManager = FluxManager.attach(app, {
-  port: 3001,     // FluxManager runs on separate port
-  route: '/flux-manager'
-});
-app.listen(3000); // Your app runs on port 3000
-// Access: http://localhost:3001/flux-manager
-
-// Option 3: Standalone mode
-const fluxManager = FluxManager.attach(null, {
-  port: 3001,     // FluxManager runs independently
-  route: '/flux-manager'
-});
-// Access: http://localhost:3001/flux-manager
-```
-
-## ⚙️ Configuration Options
-
-```javascript
-const fluxManager = new FluxManager({
-  // Dashboard route (default: '/flux-manager')
-  route: '/debug',
-  
-  // server port (default: 3001)
-  port: 3001,
-  
-  // Maximum stored requests (default: 1000)
-  maxRequests: 500,
-  
-  // Enable/disable WebSocket (default: true)
-  enableWebSocket: true,
-  
-  // Auto-start servers (default: true)
-  autoStart: true
-});
-```
-
-## 🛡️ Security Considerations
-
-### Production Deployment
-
-⚠️ **Important**: Flux Manager captures complete request/response data including headers and bodies. Consider these security implications:
-
-1. **Sensitive Data**: Request/response bodies may contain sensitive information
-2. **Authentication**: No built-in authentication - secure the debugger route
-3. **Memory Usage**: In-memory storage grows with request volume
-4. **Network Exposure**: WebSocket connections should be secured
-
-
-## 🚀 Performance Optimization
-
-### Memory Management
-- **Circular Buffer**: Automatically removes old requests when limit is reached
-- **Configurable Limits**: Adjust `maxRequests` based on available memory
-- **Efficient Filtering**: In-memory filtering with minimal overhead
-
-### Network Optimization
-- **Pagination**: API responses are paginated to reduce payload size
-- **WebSocket Compression**: Automatic compression for real-time updates
-- **Static Asset Caching**: Frontend assets served with appropriate cache headers
-
-### Monitoring Recommendations
-```javascript
-// Monitor memory usage
-setInterval(() => {
-  const memUsage = process.memoryUsage();
-  console.log('Memory usage:', {
-    rss: Math.round(memUsage.rss / 1024 / 1024) + 'MB',
-    heapUsed: Math.round(memUsage.heapUsed / 1024 / 1024) + 'MB'
-  });
-}, 30000);
-```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please follow these guidelines:
-
-1. **Fork the repository**
-2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
-3. **Commit changes**: `git commit -m 'Add amazing feature'`
-4. **Push to branch**: `git push origin feature/amazing-feature`
-5. **Open a Pull Request**
-
-### Development Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/thejesbin/flux-manager.git
-cd flux-manager
-
-# Install dependencies
-npm install
-```
-
-## 📝 License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-**Made with 💜 by the Flux Manager Team**
-
-For questions, issues, or feature requests, please visit our [GitHub repository](https://github.com/thejesbin/flux-manager).
+[MIT](https://github.com/thejesbin/peekinside/blob/HEAD/LICENSE)
