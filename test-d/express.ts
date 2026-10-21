@@ -3,7 +3,7 @@ import PeekInside from "peekinside";
 
 const app = express();
 PeekInside.attach(app, { project: "api" }).attachTo(app, { maxBodySize: 1024 });
-const peek = new PeekInside({ local: false, captureExceptions: true, sourceContext: false, sourceMaps: true, release: "v2.4.0", loopBlockMs: 200, runtime: false });
+const peek = new PeekInside({ local: false, captureExceptions: true, sourceContext: false, sourceMaps: true, release: "v2.4.0", loopBlockMs: 200, runtime: false, heapProfiling: false, cpuProfiling: false });
 const release: string | null = peek.release;
 void release;
 app.use(peek.expressMiddleware());

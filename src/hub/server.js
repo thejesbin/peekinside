@@ -14,7 +14,8 @@
  *   GET    /api/projects/:id/exceptions        Exception summaries, paged like requests
  *   GET    /api/projects/:id/exceptions/:eid   One exception's full detail
  *   DELETE /api/projects/:id/exceptions        Delete a project's exceptions
- *   GET    /api/projects/:id/runtime           Recent processes with their memory, CPU and event-loop samples
+ *   GET    /api/projects/:id/runtime           Recent processes with their memory, CPU and event-loop samples, where
+ *                                              their heap is held, and what blocked their event loop
  *   GET    /api/projects/:id/jobs              Job run summaries, paged like requests
  *   GET    /api/projects/:id/jobs/:jid         One job run's detail
  *   DELETE /api/projects/:id/jobs              Delete a project's job runs
@@ -262,6 +263,8 @@ export class HubServer {
     const addedExceptions = this.store.appendExceptions(payload.project.id, payload.exceptions);
     this.store.noteBlocked(payload.project.id, payload.blocked);
     this.store.addSamples(payload.project.id, payload.instance, payload.samples);
+    this.store.addHeapWindows(payload.project.id, payload.instance, payload.heapWindows);
+    this.store.addBlockWindows(payload.project.id, payload.instance, payload.blockWindows);
     const addedJobs = this.store.appendJobs(payload.project.id, payload.jobs);
     const addedLogs = this.store.appendLogs(payload.project.id, payload.logs);
     const addedDumps = this.store.appendDumps(payload.project.id, payload.dumps);

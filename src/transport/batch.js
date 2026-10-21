@@ -32,6 +32,9 @@ const UNKNOWN_SIZE = 16 * 1024;
 const sizes = new WeakMap();
 // Process samples kept while the destination is down: the newest win.
 const MAX_SAMPLES = 60;
+// Heap profile and block windows kept while the destination is down: the newest win.
+const MAX_HEAP_WINDOWS = 12;
+const MAX_BLOCK_WINDOWS = 12;
 
 /**
  * Abstract base of CloudTransport and LocalTransport.
@@ -84,6 +87,16 @@ export class BatchTransport {
      * @type {import('../runtime/sampler.js').RuntimeSample[]}
      */
     this.samples = [];
+    /**
+     * Heap profile windows waiting to be sent (see HeapProfiler), sent along with the next batch
+     * @type {import('../runtime/heap-profiler.js').HeapWindow[]}
+     */
+    this.heapWindows = [];
+    /**
+     * Windows of event-loop blocks and what ran during them (see BlockRecorder), sent along with the next batch
+     * @type {import('../runtime/cpu-profiler.js').BlockWindow[]}
+     */
+    this.blockWindows = [];
     // Registered by subclasses, each with its own policy; removed by stop().
     this._onBeforeExit = () => this.flush();
   }
@@ -147,6 +160,74 @@ export class BatchTransport {
     this.samples.unshift(...samples);
     if (this.samples.length > MAX_SAMPLES) this.samples.splice(0, this.samples.length - MAX_SAMPLES);
   }
+
+  /**
+   * Queues a heap profile window; it goes with the next batch, like samples.
+   *
+   * @param {import('../runtime/heap-profiler.js').HeapWindow} window
+   * @returns {void}
+   */
+  addHeapWindow(window) {
+    if (this.disabled) return;
+    this.heapWindows.push(window);
+    if (this.heapWindows.length > MAX_HEAP_WINDOWS) this.heapWindows.splice(0, this.heapWindows.length - MAX_HEAP_WINDOWS);
+    RequestContext.outside(() => this._onQueued());
+  }
+
+  /**
+   * Takes the heap profile windows to send with a batch.
+   *
+   * @returns {import('../runtime/heap-profiler.js').HeapWindow[]}
+   */
+  takeHeapWindows() {
+    return this.heapWindows.splice(0);
+  }
+
+  /**
+   * Puts heap profile windows back after a batch failed, ahead of newer ones.
+   *
+   * @param {import('../runtime/heap-profiler.js').HeapWindow[]} windows
+   * @returns {void}
+   */
+  restoreHeapWindows(windows) {
+    if (!windows.length || this.disabled) return;
+    this.heapWindows.unshift(...windows);
+    if (this.heapWindows.length > MAX_HEAP_WINDOWS) this.heapWindows.splice(0, this.heapWindows.length - MAX_HEAP_WINDOWS);
+  }
+  /**
+   * Queues a window of event-loop blocks; it goes with the next batch, like samples.
+   *
+   * @param {import('../runtime/cpu-profiler.js').BlockWindow} window
+   * @returns {void}
+   */
+  addBlockWindow(window) {
+    if (this.disabled) return;
+    this.blockWindows.push(window);
+    if (this.blockWindows.length > MAX_BLOCK_WINDOWS) this.blockWindows.splice(0, this.blockWindows.length - MAX_BLOCK_WINDOWS);
+    RequestContext.outside(() => this._onQueued());
+  }
+
+  /**
+   * Takes the block windows to send with a batch.
+   *
+   * @returns {import('../runtime/cpu-profiler.js').BlockWindow[]}
+   */
+  takeBlockWindows() {
+    return this.blockWindows.splice(0);
+  }
+
+  /**
+   * Puts block windows back after a batch failed, ahead of newer ones.
+   *
+   * @param {import('../runtime/cpu-profiler.js').BlockWindow[]} windows
+   * @returns {void}
+   */
+  restoreBlockWindows(windows) {
+    if (!windows.length) return;
+    this.blockWindows.unshift(...windows);
+    if (this.blockWindows.length > MAX_BLOCK_WINDOWS) this.blockWindows.splice(0, this.blockWindows.length - MAX_BLOCK_WINDOWS);
+  }
+
 
   /**
    * Delivers records synchronously, for a process that may exit as soon as this returns (a crash,
@@ -253,7 +334,7 @@ export class BatchTransport {
    * @returns {boolean} Whether anything is waiting to be sent
    */
   _hasPending() {
-    return this.queue.length > 0 || this.samples.length > 0;
+    return this.queue.length > 0 || this.samples.length > 0 || this.heapWindows.length > 0 || this.blockWindows.length > 0;
   }
 
   /** Scheduling hook: a record was queued. */

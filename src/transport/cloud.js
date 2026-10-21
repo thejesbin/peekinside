@@ -126,6 +126,9 @@ export class CloudTransport extends BatchTransport {
     this._resending = null;
     // Alert rules on sealed fields, checked here before records are sealed (started with the first batch).
     this.rules = new RuleMatcher({ fetchRules: () => this._fetchRules() });
+    // What PeekInside Cloud says this project's plan includes (heap and CPU profiles), from its answers.
+    this.features = null;
+    this.featureListeners = [];
     // Set when records that didn't fit in the last POST wait for the next one.
     this._more = false;
     // Batches spooled by an earlier run that crashed.
@@ -241,23 +244,47 @@ export class CloudTransport extends BatchTransport {
     if (logs.length) body.logs = logs;
     if (alerts.length) body.alerts = alerts;
     const samples = this.takeSamples();
-    if (samples.length) {
+    const heapWindows = this.takeHeapWindows();
+    const blockWindows = this.takeBlockWindows();
+    if (samples.length || heapWindows.length || blockWindows.length) {
       body.instance = { ...this.instance, environment: this.environment, release: this.release };
-      body.samples = samples;
+    }
+    if (samples.length) body.samples = samples;
+    // Where the heap's memory is held: when and how much stay readable; the code locations are sealed.
+    if (heapWindows.length) {
+      body.heapWindows = await Promise.all(heapWindows.map(async ({ at, reason, total, sites }) => {
+        const id = randomUUID();
+        return { id, at, reason, total, sites: await sealer.seal(JSON.stringify(sites), `heap:${id}`) };
+      }));
+    }
+    // Event-loop blocks: when, how many and how long stay readable; the functions that ran are sealed.
+    if (blockWindows.length) {
+      body.blockWindows = await Promise.all(blockWindows.map(async ({ at, count, total, worst, sites }) => {
+        const id = randomUUID();
+        return { id, at, count, total, worst, sites: await sealer.seal(JSON.stringify(sites), `blocks:${id}`) };
+      }));
     }
     let response;
     try {
       response = await this._post(JSON.stringify(body));
     } catch (error) {
       this.restoreSamples(samples);
+      this.restoreHeapWindows(heapWindows);
+      this.restoreBlockWindows(blockWindows);
       throw error;
     }
-    if (response.status >= 500) this.restoreSamples(samples);
+    if (response.status >= 500) {
+      this.restoreSamples(samples);
+      this.restoreHeapWindows(heapWindows);
+      this.restoreBlockWindows(blockWindows);
+    }
     const sent = batch.length - rest.length;
 
     if (response.ok) {
       // PeekInside Cloud answers: from now on, the alert rules it holds are checked here too.
       this.rules.start();
+      const answer = await response.json().catch(() => null);
+      if (answer && answer.features && typeof answer.features === 'object') this._setFeatures(answer.features);
       this._requeue(rest);
       return true;
     }
@@ -275,6 +302,31 @@ export class CloudTransport extends BatchTransport {
     }
     // Server errors are retried like network errors.
     throw new Error(reason);
+  }
+
+  /**
+   * Calls `listener` with what PeekInside Cloud says this project's plan includes
+   * (`{ heapProfiling, cpuProfiling }`), each time that changes: right away if it has already answered.
+   *
+   * @param {(features: { heapProfiling: boolean, cpuProfiling: boolean }) => void} listener
+   * @returns {void}
+   */
+  onFeatures(listener) {
+    this.featureListeners.push(listener);
+    if (this.features) listener(this.features);
+  }
+
+  _setFeatures(value) {
+    const features = { heapProfiling: value.heapProfiling === true, cpuProfiling: value.cpuProfiling === true };
+    if (this.features && this.features.heapProfiling === features.heapProfiling && this.features.cpuProfiling === features.cpuProfiling) return;
+    this.features = features;
+    for (const listener of this.featureListeners) {
+      try {
+        listener(features);
+      } catch (error) {
+        // A listener's failure never stops sending.
+      }
+    }
   }
 
   // Ending while waiting to retry after a failure: what's queued is spooled rather than lost.

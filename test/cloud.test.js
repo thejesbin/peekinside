@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { webcrypto } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import express from 'express';
 import PeekInside from '../index.js';
 import { Sealer, SyncSealer } from '../src/crypto.js';
@@ -44,6 +45,7 @@ process.env.PEEKINSIDE_HUB_PORT = String(await new Promise((resolve) => {
 // The fake PeekInside Cloud: records every batch it is sent, or answers 503 while `down`.
 const batches = [];
 let down = false;
+let answer = { accepted: true };
 const ingest = http.createServer((req, res) => {
   let body = '';
   req.setEncoding('utf8');
@@ -55,7 +57,7 @@ const ingest = http.createServer((req, res) => {
     }
     batches.push({ headers: req.headers, body: JSON.parse(body), bytes: Buffer.byteLength(body) });
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{"accepted":true}');
+    res.end(JSON.stringify(answer));
   });
 });
 let ingestUrl;
@@ -121,6 +123,14 @@ async function openException(sealed) {
 
 async function openEvent(sealed) {
   return { ...sealed, summary: await open(sealed.summary, `summary:${sealed.id}`), detail: await open(sealed.detail, `detail:${sealed.id}`) };
+}
+
+// A block in the app's own code.
+function reconcileLedger(ms) {
+  const end = performance.now() + ms;
+  let total = 0;
+  while (performance.now() < end) total += Math.sqrt(total + 5);
+  return total;
 }
 
 async function waitFor(check, what) {
@@ -247,6 +257,73 @@ test('cloud mode seals exceptions into the same batches as requests', async () =
   } finally {
     peekInside.stop();
     server.close();
+  }
+});
+
+test('heap and CPU profiles run once PeekInside Cloud says the plan includes them, and go out sealed', async () => {
+  batches.length = 0;
+  answer = { accepted: true, features: { heapProfiling: true, cpuProfiling: true } };
+  const app = express();
+  app.set('env', 'test');
+  const log = console.log;
+  console.log = () => {};
+  const peekInside = PeekInside.attach(app, { apiKey: API_KEY, local: false });
+  console.log = log;
+  try {
+    assert.equal(peekInside._heap.running, false, 'off until PeekInside Cloud answers');
+    assert.equal(peekInside._blocks.running, true, 'the CPU profiler starts with the app (V8 only places code compiled after it starts)');
+    peekInside._sampler.take();
+    await waitFor(() => {
+      void peekInside.flush();
+      return peekInside._heap.running;
+    }, 'the profiler to start');
+
+    // Something held since sampling started (4 MB), for the profile to show.
+    const held = [];
+    for (let i = 0; i < 2000; i++) held.push(new Array(256).fill(i));
+    const window = peekInside._heap.take();
+    assert.ok(window.sites.length && held.length);
+    const batch = await waitFor(() => {
+      void peekInside.flush();
+      return batches.find((item) => item.body.heapWindows);
+    }, 'a batch with a heap profile');
+    const [sealed] = batch.body.heapWindows;
+    assert.deepEqual(Object.keys(sealed), ['id', 'at', 'reason', 'total', 'sites']);
+    assert.deepEqual([sealed.at, sealed.reason, sealed.total], [window.at, 'interval', window.total], 'when and how much stay readable');
+    assert.match(sealed.sites, /^v1\./);
+    const raw = JSON.stringify(batch.body);
+    for (const site of window.sites) {
+      if (site.file) assert.ok(!raw.includes(site.file), 'code locations are sealed');
+    }
+    assert.deepEqual(await open(sealed.sites, `heap:${sealed.id}`), window.sites);
+    await assert.rejects(open(sealed.sites, 'heap:another'), 'bound to its window');
+    assert.equal(batch.body.instance.id, peekInside._cloud.instance.id, 'the process it came from');
+
+    // A block, and the window that names what ran.
+    reconcileLedger(220);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const blocks = peekInside._blocks.flush(true);
+    assert.equal(blocks.sites[0].function, 'reconcileLedger', JSON.stringify(blocks.sites));
+    const blockBatch = await waitFor(() => {
+      void peekInside.flush();
+      return batches.find((item) => item.body.blockWindows);
+    }, 'a batch with a block window');
+    const [sealedBlocks] = blockBatch.body.blockWindows;
+    assert.deepEqual(Object.keys(sealedBlocks), ['id', 'at', 'count', 'total', 'worst', 'sites']);
+    assert.deepEqual([sealedBlocks.at, sealedBlocks.count, sealedBlocks.total, sealedBlocks.worst], [blocks.at, blocks.count, blocks.total, blocks.worst], 'when, how many and how long stay readable');
+    assert.ok(!JSON.stringify(blockBatch.body).includes('reconcileLedger'), 'the functions are sealed');
+    assert.deepEqual(await open(sealedBlocks.sites, `blocks:${sealedBlocks.id}`), blocks.sites);
+
+    // The plan changed: profiling stops.
+    answer = { accepted: true, features: { heapProfiling: false, cpuProfiling: false } };
+    peekInside._sampler.take();
+    await waitFor(() => {
+      void peekInside.flush();
+      return !peekInside._heap.running && !peekInside._blocks.running;
+    }, 'the profilers to stop');
+  } finally {
+    answer = { accepted: true };
+    peekInside.stop();
   }
 });
 
