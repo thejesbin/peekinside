@@ -152,7 +152,7 @@ export class LocalTransport extends BatchTransport {
   }
 
   _hasPending() {
-    return this.queue.length > 0 || this.blocked.size > 0 || this.samples.length > 0;
+    return this.queue.length > 0 || this.blocked.size > 0 || this.samples.length > 0 || this.heapWindows.length > 0 || this.blockWindows.length > 0;
   }
 
   _onQueued() {
@@ -209,10 +209,12 @@ export class LocalTransport extends BatchTransport {
     }
     const blocked = this.blocked.take();
     const samples = this.takeSamples();
+    const heapWindows = this.takeHeapWindows();
+    const blockWindows = this.takeBlockWindows();
     const { requests, exceptions, jobs, logs, dumps, mails } = BatchTransport.split(batch);
     try {
       const answer = await this.hub.request('POST', '/api/ingest', {
-        body: { project: this.project, instance: this.instance, requests, exceptions, jobs, logs, dumps, mails, samples, blocked: blocked.map(([, entry]) => entry) }
+        body: { project: this.project, instance: this.instance, requests, exceptions, jobs, logs, dumps, mails, samples, heapWindows, blockWindows, blocked: blocked.map(([, entry]) => entry) }
       });
       if (exceptions.length && answer.acceptedExceptions === undefined) this._noteOutdatedHub();
       else if ((jobs.length || logs.length) && answer.acceptedJobs === undefined) this._noteOutdatedHub();
@@ -237,6 +239,8 @@ export class LocalTransport extends BatchTransport {
       // Not running, starting up, or restarting: keep everything and try again shortly.
       this.blocked.restore(blocked);
       this.restoreSamples(samples);
+      this.restoreHeapWindows(heapWindows);
+      this.restoreBlockWindows(blockWindows);
       throw error;
     }
   }

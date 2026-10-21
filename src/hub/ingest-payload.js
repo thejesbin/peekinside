@@ -61,6 +61,14 @@ const SAMPLE_EXTRAS = [
   ['requests', 1e9],
   ['inFlight', 1e7]
 ];
+// Heap profiles per batch (the SDK reads one a minute and keeps 12 while the hub is down), and the
+// code locations each may name.
+const MAX_HEAP_WINDOWS = 12;
+const MAX_HEAP_SITES = 100;
+const SITE_ID = /^[0-9a-f]{12}$/;
+// Windows of event-loop blocks per batch (one a minute at most), and the functions each may name.
+const MAX_BLOCK_WINDOWS = 12;
+const MAX_BLOCK_SITES = 50;
 
 /**
  * A validated ingest batch: `{ project, instance, requests, exceptions, samples, blocked }`.
@@ -94,7 +102,7 @@ export class IngestPayload {
     if (!Array.isArray(dumps) || dumps.length > MAX_DUMPS_BATCH || !Array.isArray(mails) || mails.length > MAX_MAILS_BATCH) {
       return null;
     }
-    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, mails, samples: body.samples, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
+    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, mails, samples: body.samples, heapWindows: body.heapWindows, blockWindows: body.blockWindows, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
   }
 
   /**
@@ -110,11 +118,13 @@ export class IngestPayload {
    * @param {Array} [parts.dumps] - Dumps as sent
    * @param {Array} [parts.mails] - Emails as sent
    * @param {*} [parts.samples] - Process samples (memory, CPU, event-loop delay), as sent
+   * @param {*} [parts.heapWindows] - Where the heap was held (code locations and bytes), as sent
+   * @param {*} [parts.blockWindows] - Event-loop blocks and the code that ran during them, as sent
    * @param {*} parts.blocked - Counts of unrecorded server requests, as sent
    * @param {boolean} [parts.hasExceptions=false] - Whether the batch had an exception list (SDKs
    *   from before exceptions don't send one)
    */
-  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], mails = [], samples, blocked, hasExceptions = false }) {
+  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], mails = [], samples, heapWindows, blockWindows, blocked, hasExceptions = false }) {
     this.project = project;
     this.instance = instance;
     /**
@@ -147,6 +157,16 @@ export class IngestPayload {
      * @type {Object[]}
      */
     this.samples = readSamples(samples);
+    /**
+     * The valid heap profiles, oldest first: each the code locations holding the most memory
+     * @type {{ at: number, reason: 'interval'|'pressure', total: number, sites: Object[] }[]}
+     */
+    this.heapWindows = readHeapWindows(heapWindows);
+    /**
+     * The valid windows of event-loop blocks, oldest first: how many, how long, and the code that ran
+     * @type {{ at: number, count: number, total: number, worst: number, sites: Object[] }[]}
+     */
+    this.blockWindows = readBlockWindows(blockWindows);
     /**
      * The valid job runs and log lines, flattened into what the store keeps
      * @type {Object[]}
@@ -426,6 +446,64 @@ function readSamples(value) {
   });
 }
 
+// Where the heap was held, now and then. A malformed profile is skipped, as is a malformed line of one.
+function readHeapWindows(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-MAX_HEAP_WINDOWS).flatMap((window) => {
+    if (!window || typeof window !== 'object' || !Number.isFinite(window.at) || !Array.isArray(window.sites)) return [];
+    if (!Number.isFinite(window.total) || window.total < 0 || window.total > 1e13) return [];
+    return [{
+      at: window.at,
+      reason: window.reason === 'pressure' ? 'pressure' : 'interval',
+      total: Math.round(window.total),
+      sites: window.sites.slice(0, MAX_HEAP_SITES).flatMap(readHeapSite)
+    }];
+  });
+}
+
+function readHeapSite(site) {
+  const location = readSite(site);
+  if (!location || !Number.isFinite(site.bytes) || site.bytes < 0 || site.bytes > 1e13) return [];
+  return [{ ...location, bytes: Math.round(site.bytes) }];
+}
+
+// When the loop was blocked, and what ran meanwhile. A malformed window is skipped, as is a
+// malformed function of one.
+function readBlockWindows(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-MAX_BLOCK_WINDOWS).flatMap((window) => {
+    if (!window || typeof window !== 'object' || !Number.isFinite(window.at) || !Array.isArray(window.sites)) return [];
+    if (!Number.isInteger(window.count) || window.count < 1 || window.count > 1e6) return [];
+    if (!isMs(window.total) || !isMs(window.worst)) return [];
+    return [{ at: window.at, count: window.count, total: window.total, worst: window.worst, sites: window.sites.slice(0, MAX_BLOCK_SITES).flatMap(readBlockSite) }];
+  });
+}
+
+function readBlockSite(site) {
+  const location = readSite(site);
+  if (!location || !isMs(site.ms) || !isMs(site.max) || !Number.isInteger(site.blocks) || site.blocks < 1) return [];
+  return [{ ...location, calls: optionalText(site.calls, 1024), ms: site.ms, blocks: site.blocks, max: site.max }];
+}
+
+// A function in a profile: its id and where it is.
+function readSite(site) {
+  if (!site || typeof site !== 'object' || typeof site.id !== 'string' || !SITE_ID.test(site.id)) return null;
+  return {
+    id: site.id,
+    function: optionalText(site.function, 1024),
+    file: optionalText(site.file, 4096),
+    relativeFile: optionalText(site.relativeFile, 4096),
+    line: positiveInt(site.line),
+    column: positiveInt(site.column),
+    package: optionalText(site.package, 214),
+    inApp: site.inApp === true
+  };
+}
+
+function isMs(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 1e9;
+}
+
 function readLocation(value) {
   if (!value || typeof value !== 'object' || typeof value.file !== 'string') return null;
   return {
@@ -477,6 +555,10 @@ function release(value) {
 
 function text(value, max) {
   return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+function optionalText(value, max) {
+  return typeof value === 'string' && value ? value.slice(0, max) : null;
 }
 
 function byteCount(value) {

@@ -306,7 +306,35 @@ export class Store {
   }
 
   /**
-   * A project's recent processes with their samples.
+   * Adds heap profiles of a project's process (kept in memory, for the Runtime page).
+   *
+   * @param {string} projectId
+   * @param {Object} instance - Validated process details
+   * @param {Object[]} windows - Validated profiles
+   * @param {number} [now=Date.now()]
+   * @returns {void}
+   */
+  addHeapWindows(projectId, instance, windows, now = Date.now()) {
+    const project = this.projects.get(projectId);
+    if (project) project.addHeapWindows(instance, windows, now);
+  }
+
+  /**
+   * Adds windows of event-loop blocks of a project's process (kept in memory, for the Runtime page).
+   *
+   * @param {string} projectId
+   * @param {Object} instance - Validated process details
+   * @param {Object[]} windows - Validated windows
+   * @param {number} [now=Date.now()]
+   * @returns {void}
+   */
+  addBlockWindows(projectId, instance, windows, now = Date.now()) {
+    const project = this.projects.get(projectId);
+    if (project) project.addBlockWindows(instance, windows, now);
+  }
+
+  /**
+   * A project's recent processes with their samples, heap profiles and block windows.
    *
    * @param {string} projectId
    * @param {number} [now=Date.now()]

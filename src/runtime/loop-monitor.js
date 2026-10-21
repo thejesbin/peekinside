@@ -67,6 +67,18 @@ export class LoopMonitor {
   }
 
   /**
+   * Calls `listener(start, duration)` for each block, before the timelines hear of it (the CPU
+   * profiler works out what ran, for them too).
+   *
+   * @param {(start: number, duration: number) => void} listener
+   * @returns {() => void} Stops listening
+   */
+  static onBlock(listener) {
+    LoopMonitor.blockListeners.add(listener);
+    return () => LoopMonitor.blockListeners.delete(listener);
+  }
+
+  /**
    * The block in progress, if the timer is late right now: a request that blocked the loop itself
    * often finishes before the timer can fire, and asks when its timeline closes.
    *
@@ -126,6 +138,13 @@ export class LoopMonitor {
     this.size = Math.min(MAX_DELAYS, this.size + 1);
     if (delay < MIN_BLOCK_MS) return;
     // The loop was blocked from when the tick was due until now.
+    for (const listener of LoopMonitor.blockListeners) {
+      try {
+        listener(now - delay, delay);
+      } catch (error) {
+        // A listener's failure never affects the timelines.
+      }
+    }
     for (const timeline of this.timelines) {
       try {
         timeline.block(now - delay, delay);
@@ -156,6 +175,7 @@ export class LoopMonitor {
 }
 
 LoopMonitor.shared = null;
+LoopMonitor.blockListeners = new Set();
 
 function round(value) {
   return Math.round(value * 10) / 10;

@@ -77,14 +77,14 @@ Open it and use your app: requests show up as they happen. To check the setup be
 - **Jobs:** node-cron, cron, BullMQ and `@nestjs/schedule`, or your own with `PeekInside.job()`. A scheduled job that misses its run is flagged.
 - **Dumps:** `PeekInside.dump(value)` shows a value in the dashboard instead of your terminal, as a tree you can open, under the request it belongs to.
 - **Emails:** every email sent with nodemailer, previewed in the local dashboard as a phone or a desktop shows it, with its text and recipients, linked to the request that sent it.
-- **Runtime:** memory, CPU and event-loop delay over time, and the requests in flight when the event loop was blocked.
+- **Runtime:** memory, CPU and event-loop delay over time; [what blocked the event loop](https://www.peekinside.dev/docs/runtime#what-blocked-the-event-loop), named on every request that waited; and [memory leaks](https://www.peekinside.dev/docs/runtime#memory-leaks): heap profiles name the function whose memory grows, and what held it when a process ran out.
 - **Who and which deploy:** the user each request was for (`PeekInside.setUser()`) and the release each error came from.
 
 ## On your machine, and on your servers
 
 **The local dashboard** is free, needs no account, and keeps what it records on your machine. The first app that needs it starts it in the background, and every app on your machine that uses PeekInside shows up in it as a project. Once you've fixed a bug, **[Replay](https://www.peekinside.dev/docs/dashboard#replay-a-request)** sends the request that failed to your app again and opens the two side by side. It's for development: it's off when `NODE_ENV` is `production`.
 
-**[PeekInside Cloud](https://www.peekinside.dev/docs/cloud)** is the same dashboard for your servers and your team. Set `PEEKINSIDE_API_KEY` on a server and the same `PeekInside.attach()` sends there. What it sends is encrypted on your server and decrypted in your browser, so PeekInside Cloud only ever stores ciphertext. With Pro and up, alerts reach you by email or Slack. No card is needed to start: see [pricing](https://www.peekinside.dev/#pricing).
+**[PeekInside Cloud](https://www.peekinside.dev/docs/cloud)** is the same dashboard for your servers and your team. Set `PEEKINSIDE_API_KEY` on a server and the same `PeekInside.attach()` sends there. What it sends is encrypted on your server and decrypted in your browser, so PeekInside Cloud only ever stores ciphertext. With Pro and up, alerts reach you by email or Slack, and heap and CPU profiles find leaks and event-loop blocks on your servers. No card is needed to start: see [pricing](https://www.peekinside.dev/#pricing).
 
 ## Documentation
 
