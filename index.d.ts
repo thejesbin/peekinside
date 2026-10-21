@@ -129,6 +129,14 @@ export interface PeekInsideOptions {
   captureJobs?: boolean;
 
   /**
+   * Records the emails the app sends with nodemailer, for the local dashboard's Mail page: the
+   * message as it was sent (HTML, text, headers, attachments' names), linked to its request or
+   * job. Local dashboard only: PeekInside Cloud never gets them.
+   * @default true
+   */
+  captureMail?: boolean;
+
+  /**
    * Keeps the values sent with queries, masked (passwords, tokens and secret-looking values
    * never leave the process).
    * @default true

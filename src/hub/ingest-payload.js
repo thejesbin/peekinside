@@ -13,10 +13,11 @@ import { PROJECT_ID } from './store.js';
 export const MAX_BATCH = 1000;
 // Exceptions per batch.
 export const MAX_EXCEPTIONS_BATCH = 500;
-// Job runs, log lines and dumps per batch.
+// Job runs, log lines, dumps and emails per batch.
 export const MAX_JOBS_BATCH = 1000;
 export const MAX_LOGS_BATCH = 2000;
 export const MAX_DUMPS_BATCH = 1000;
+export const MAX_MAILS_BATCH = 500;
 // Request ids are UUIDs in practice. They appear in URLs and index files, so only safe
 // characters are accepted.
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -86,13 +87,14 @@ export class IngestPayload {
     const jobs = body.jobs != null ? body.jobs : [];
     const logs = body.logs != null ? body.logs : [];
     const dumps = body.dumps != null ? body.dumps : [];
+    const mails = body.mails != null ? body.mails : [];
     if (!Array.isArray(jobs) || jobs.length > MAX_JOBS_BATCH || !Array.isArray(logs) || logs.length > MAX_LOGS_BATCH) {
       return null;
     }
-    if (!Array.isArray(dumps) || dumps.length > MAX_DUMPS_BATCH) {
+    if (!Array.isArray(dumps) || dumps.length > MAX_DUMPS_BATCH || !Array.isArray(mails) || mails.length > MAX_MAILS_BATCH) {
       return null;
     }
-    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, samples: body.samples, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
+    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, mails, samples: body.samples, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
   }
 
   /**
@@ -106,12 +108,13 @@ export class IngestPayload {
    * @param {Array} [parts.jobs] - Job runs as sent
    * @param {Array} [parts.logs] - Log lines as sent
    * @param {Array} [parts.dumps] - Dumps as sent
+   * @param {Array} [parts.mails] - Emails as sent
    * @param {*} [parts.samples] - Process samples (memory, CPU, event-loop delay), as sent
    * @param {*} parts.blocked - Counts of unrecorded server requests, as sent
    * @param {boolean} [parts.hasExceptions=false] - Whether the batch had an exception list (SDKs
    *   from before exceptions don't send one)
    */
-  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], samples, blocked, hasExceptions = false }) {
+  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], mails = [], samples, blocked, hasExceptions = false }) {
     this.project = project;
     this.instance = instance;
     /**
@@ -158,6 +161,12 @@ export class IngestPayload {
      */
     this.dumps = dumps.map(readDump).filter(Boolean);
     this.rejectedDumps = dumps.length - this.dumps.length;
+    /**
+     * The valid emails, flattened into what the store keeps (the message is the detail)
+     * @type {Object[]}
+     */
+    this.mails = mails.map(readMail).filter(Boolean);
+    this.rejectedMails = mails.length - this.mails.length;
     /**
      * The valid counts of server requests the SDK didn't record
      * @type {{ kind: 'host'|'client', value: string, count: number }[]}
@@ -218,6 +227,7 @@ function readRecord(value) {
     route: text(summary.route, MAX_ROUTE) || null,
     handler: text(summary.handler, MAX_HANDLER) || null,
     user: readUser(summary.user),
+    replayOf: typeof summary.replayOf === 'string' && REQUEST_ID.test(summary.replayOf) ? summary.replayOf : null,
     detail
   };
 }
@@ -342,6 +352,37 @@ function readDump(value) {
     preview: text(summary.preview, DUMP_PREVIEW),
     truncated: summary.truncated === true,
     detail: { value: tree }
+  };
+}
+
+// An email: who from and to, its subject and how it went, for the list; the message as its detail.
+// The message is the dashboard's to read, and the preview's: the hub only keeps it.
+function readMail(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (typeof value.id !== 'string' || !REQUEST_ID.test(value.id) || !Number.isFinite(value.occurredAt)) return null;
+  if (!optionalId(value.requestId) || !optionalId(value.jobRunId)) return null;
+  const summary = value.summary && typeof value.summary === 'object' ? value.summary : {};
+  const detail = value.detail && typeof value.detail === 'object' && !Array.isArray(value.detail) ? value.detail : {};
+  const error = summary.error && typeof summary.error === 'object' ? summary.error : null;
+  return {
+    id: value.id,
+    occurredAt: value.occurredAt,
+    environment: text(value.environment, 32) || 'development',
+    release: release(value.release),
+    requestId: value.requestId || null,
+    jobRunId: value.jobRunId || null,
+    location: readCaller(value.location),
+    subject: text(summary.subject, 1000),
+    from: text(summary.from, 400) || null,
+    to: Array.isArray(summary.to) ? summary.to.filter((item) => typeof item === 'string').slice(0, 3).map((item) => item.slice(0, 400)) : [],
+    recipients: byteCount(summary.recipients),
+    attachments: byteCount(summary.attachments),
+    html: summary.html === true,
+    transport: text(summary.transport, 64) || null,
+    status: summary.status === 'failed' ? 'failed' : 'sent',
+    duration: Number.isFinite(summary.duration) && summary.duration >= 0 ? summary.duration : null,
+    error: error ? { name: text(error.name, 200) || 'Error', message: text(error.message, 300) } : null,
+    detail
   };
 }
 

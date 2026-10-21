@@ -12,6 +12,7 @@ import http from 'http';
 import { performance } from 'perf_hooks';
 import { BodyDecoder, EMPTY_BODY } from './body-decoder.js';
 import { hasBody, parseQuery, stringParams } from './http-message.js';
+import { withoutReplayHeaders } from './replay.js';
 import { RequestBodyTap } from './request-body-tap.js';
 import { ResponseTap } from './response-tap.js';
 
@@ -45,6 +46,9 @@ const kBodySource = Symbol('peekInside.bodySource');
  * @property {string} [handler] - The code that handled it ("UsersController.findOne"), when known
  * @property {Array<{ id: string, label: string|null, type: string, preview: string }>} [dumps] - The
  *   dumps made during it (local dashboard only)
+ * @property {string} [replayOf] - The request it sends again, when the local dashboard replayed one
+ * @property {Array<{ id: string, subject: string, to: string[] }>} [mails] - The emails sent during
+ *   it (local dashboard only)
  */
 
 /**
@@ -73,8 +77,10 @@ export class ExchangeRecorder {
    * @param {() => number} options.maxBodySize - Returns the current maxBodySize; it is read when
    *   the bodies are tapped and again when they are decoded, so later option changes apply
    * @param {(exchange: Exchange) => void} options.onExchange - Receives the finished exchange
+   * @param {{ id: string, of: string }|null} [options.replay=null] - A replay from the local
+   *   dashboard: the id its record takes, and the request it sends again (see replay.js)
    */
-  constructor(req, res, { url, pathname, search }, { maxBodySize, onExchange }) {
+  constructor(req, res, { url, pathname, search }, { maxBodySize, onExchange, replay = null }) {
     this.req = req;
     this.res = res;
     this.url = url;
@@ -89,7 +95,13 @@ export class ExchangeRecorder {
      * exceptions recorded during the request can refer to it.
      * @type {string}
      */
-    this.id = randomUUID();
+    this.id = replay ? replay.id : randomUUID();
+
+    /**
+     * The request this one sends again, when it is a replay.
+     * @type {string|null}
+     */
+    this.replayOf = replay ? replay.of : null;
   }
 
   /**
@@ -133,7 +145,7 @@ export class ExchangeRecorder {
     const { req, res } = this;
     const duration = Number(process.hrtime.bigint() - this._start) / 1e6;
     const decoder = new BodyDecoder(this._maxBodySize());
-    const requestHeaders = { ...req.headers };
+    const requestHeaders = withoutReplayHeaders({ ...req.headers });
     const responseHeaders = this._responseTap.headers();
     const requestContent = this._requestContent(decoder, requestHeaders);
     // HEAD responses never have a body, whatever the app wrote.
@@ -169,7 +181,8 @@ export class ExchangeRecorder {
         bodyEncoding: responseContent.encoding,
         responseTime: Math.round(duration * 100) / 100,
         aborted: Boolean(aborted)
-      }
+      },
+      ...(this.replayOf ? { replayOf: this.replayOf } : {})
     };
   }
 
@@ -183,7 +196,7 @@ export class ExchangeRecorder {
    */
   snapshot(bodyLimit) {
     const req = this.req;
-    const headers = { ...req.headers };
+    const headers = withoutReplayHeaders({ ...req.headers });
     const content = this._requestContent(new BodyDecoder(bodyLimit), headers);
     return {
       method: String(req.method || ''),

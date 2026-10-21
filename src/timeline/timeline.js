@@ -37,7 +37,7 @@ export const TIMELINE_DEFAULTS = Object.freeze({
 });
 
 // Spans listed per request, by type.
-const SPAN_CAPS = Object.freeze({ query: 500, http: 100, log: 200, measure: 100, exception: 10, block: 20, dump: 50 });
+const SPAN_CAPS = Object.freeze({ query: 500, http: 100, log: 200, measure: 100, exception: 10, block: 20, dump: 50, mail: 20 });
 const MAX_STATEMENTS = 200;
 // Executions per statement whose parameters are kept.
 const PARAMS_PER_STATEMENT = 20;
@@ -121,7 +121,7 @@ export class Timeline {
     this.origin = origin;
     this.closed = false;
     this.spans = [];
-    this.listed = { query: 0, http: 0, log: 0, measure: 0, exception: 0, block: 0, dump: 0 };
+    this.listed = { query: 0, http: 0, log: 0, measure: 0, exception: 0, block: 0, dump: 0, mail: 0 };
     this.dropped = 0;
     this.statements = [];
     this.byFingerprint = new Map();
@@ -300,6 +300,31 @@ export class Timeline {
       }
     } catch (error) {
       // The dump is still on the Dumps page.
+    }
+  }
+
+  /**
+   * Starts the span of an email the request sends (local dashboard only): from the sendMail() call
+   * to the transport's answer. The Mail page has the message.
+   *
+   * @param {{ id: string, subject: string, to: string[] }} mail
+   * @returns {SpanHandle|null} null once the request's timeline is closed
+   */
+  mail(mail) {
+    if (this.closed) return null;
+    try {
+      const startedAt = performance.now();
+      let span = null;
+      if (this.listed.mail < SPAN_CAPS.mail) {
+        this.listed.mail++;
+        span = { type: 'mail', start: this._offset(startedAt), duration: null, id: mail.id, subject: cut(mail.subject, MAX_LOG), to: mail.to.slice(0, 3) };
+        this.spans.push(span);
+      } else {
+        this.dropped++;
+      }
+      return new SpanHandle(this, 'mail', span, startedAt, null);
+    } catch (error) {
+      return null;
     }
   }
 
