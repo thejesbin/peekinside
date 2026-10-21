@@ -9,6 +9,7 @@
  *   jobs/00000001.*          job runs, in the same format
  *   logs/00000001.*          log lines: the index keeps the start of each line, the details the rest
  *   dumps/00000001.*         dumps: the index keeps a preview of each value, the details its tree
+ *   mails/00000001.*         emails: the index keeps who to and the subject, the details the message
  *
  * Process samples (memory, CPU, event-loop delay) are kept in memory only, for the Runtime page:
  * the last six hours of each of the project's recent processes.
@@ -34,15 +35,17 @@ const MAX_BLOCKED_ENTRIES = 10;
 const MAX_RUNTIME_SAMPLES = 2160;
 const MAX_RUNTIME_PROCESSES = 8;
 // Fields a summary may contain, in the order they are written.
-const SUMMARY_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'method', 'status', 'duration', 'requestSize', 'responseSize', 'aborted', 'exceptionCount', 'stats', 'url', 'path', 'contentType', 'route', 'handler', 'user'];
+const SUMMARY_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'method', 'status', 'duration', 'requestSize', 'responseSize', 'aborted', 'exceptionCount', 'stats', 'url', 'path', 'contentType', 'route', 'handler', 'user', 'replayOf'];
 const EXCEPTION_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'handled', 'fatal', 'requestId', 'jobRunId', 'name', 'message', 'code', 'fingerprint', 'mechanism', 'location', 'request', 'job', 'user'];
 const JOB_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'name', 'queue', 'schedule', 'timezone', 'trigger', 'status', 'duration', 'attempt', 'exceptionCount', 'stats', 'error', 'user'];
 const LOG_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'level', 'source', 'requestId', 'jobRunId', 'message'];
 const DUMP_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'requestId', 'jobRunId', 'label', 'location', 'type', 'preview', 'truncated'];
+const MAIL_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'requestId', 'jobRunId', 'location', 'subject', 'from', 'to', 'recipients', 'attachments', 'html', 'transport', 'status', 'duration', 'error'];
 const EXCEPTIONS_FOLDER = 'exceptions';
 const JOBS_FOLDER = 'jobs';
 const LOGS_FOLDER = 'logs';
 const DUMPS_FOLDER = 'dumps';
+const MAILS_FOLDER = 'mails';
 
 /**
  * @typedef {Object} ProjectInfo
@@ -75,7 +78,8 @@ export class ProjectLog {
    * @param {number} limits.maxJobs - Job runs kept
    * @param {number} limits.maxLogs - Log lines kept
    * @param {number} limits.maxDumps - Dumps kept
-   * @param {{ requests?: SegmentLog, exceptions?: SegmentLog, jobs?: SegmentLog, logs?: SegmentLog, dumps?: SegmentLog }} [logs] - Logs
+   * @param {number} limits.maxMails - Emails kept
+   * @param {{ requests?: SegmentLog, exceptions?: SegmentLog, jobs?: SegmentLog, logs?: SegmentLog, dumps?: SegmentLog, mails?: SegmentLog }} [logs] - Logs
    *   read from disk
    */
   constructor(dir, info, limits, logs = {}) {
@@ -87,6 +91,7 @@ export class ProjectLog {
     this.jobs = logs.jobs || new SegmentLog(path.join(dir, JOBS_FOLDER), ProjectLog._jobOptions(info, limits));
     this.logs = logs.logs || new SegmentLog(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits));
     this.dumps = logs.dumps || new SegmentLog(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits));
+    this.mails = logs.mails || new SegmentLog(path.join(dir, MAILS_FOLDER), ProjectLog._mailOptions(info, limits));
     this.exceptionState = new ExceptionState(dir);
     // Processes running the project, by pid. In memory only: they check in again after a restart.
     this.instances = new Map();
@@ -117,7 +122,8 @@ export class ProjectLog {
       exceptionSeqBase: 1,
       jobSeqBase: 1,
       logSeqBase: 1,
-      dumpSeqBase: 1
+      dumpSeqBase: 1,
+      mailSeqBase: 1
     }, limits);
     project.save();
     return project;
@@ -145,6 +151,7 @@ export class ProjectLog {
       jobSeqBase: Number(saved.jobSeqBase) || 1,
       logSeqBase: Number(saved.logSeqBase) || 1,
       dumpSeqBase: Number(saved.dumpSeqBase) || 1,
+      mailSeqBase: Number(saved.mailSeqBase) || 1,
       ...(isBlockedInfo(saved.blocked) ? { blocked: saved.blocked } : {})
     };
     return new ProjectLog(dir, info, limits, {
@@ -152,7 +159,8 @@ export class ProjectLog {
       exceptions: SegmentLog.load(path.join(dir, EXCEPTIONS_FOLDER), ProjectLog._exceptionOptions(info, limits)),
       jobs: SegmentLog.load(path.join(dir, JOBS_FOLDER), ProjectLog._jobOptions(info, limits)),
       logs: SegmentLog.load(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits)),
-      dumps: SegmentLog.load(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits))
+      dumps: SegmentLog.load(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits)),
+      mails: SegmentLog.load(path.join(dir, MAILS_FOLDER), ProjectLog._mailOptions(info, limits))
     });
   }
 
@@ -286,6 +294,16 @@ export class ProjectLog {
    */
   detail(requestId) {
     return this.requests.detail(requestId);
+  }
+
+  /**
+   * One request's summary, as the request list shows it.
+   *
+   * @param {string} requestId
+   * @returns {Object|null} null when it is no longer stored
+   */
+  summary(requestId) {
+    return this.requests.summary(requestId);
   }
 
   /**
@@ -467,6 +485,48 @@ export class ProjectLog {
   }
 
   /**
+   * Stores new emails; ones already stored (same id) are skipped.
+   *
+   * @param {Object[]} records - Validated emails, with their detail (the message)
+   * @returns {Object[]}
+   */
+  appendMails(records) {
+    return this.mails.append(records);
+  }
+
+  /**
+   * Email summaries, newest first; oldest first when `after` is given.
+   *
+   * @param {{ after?: number, before?: number, limit: number }} query
+   * @returns {{ mails: Object[], hasMore: boolean }}
+   */
+  listMails(query) {
+    const { entries, hasMore } = this.mails.list(query);
+    return { mails: entries, hasMore };
+  }
+
+  /**
+   * One email's message.
+   *
+   * @param {string} mailId
+   * @returns {Object|null}
+   */
+  mailDetail(mailId) {
+    return this.mails.detail(mailId);
+  }
+
+  /**
+   * Deletes all emails.
+   *
+   * @returns {void}
+   */
+  clearMails() {
+    this.mails.clear();
+    this.info.mailSeqBase = this.mails.seqBase;
+    this.save();
+  }
+
+  /**
    * Deletes the project's folder.
    *
    * @returns {void}
@@ -495,6 +555,7 @@ export class ProjectLog {
     const newestException = this.exceptions.newest;
     const newestJob = this.jobs.newest;
     const newestDump = this.dumps.newest;
+    const newestMail = this.mails.newest;
     return {
       id: this.info.id,
       name: this.info.name,
@@ -510,6 +571,8 @@ export class ProjectLog {
       logCount: this.logs.size,
       dumpCount: this.dumps.size,
       lastDumpAt: newestDump ? newestDump.occurredAt : null,
+      mailCount: this.mails.size,
+      lastMailAt: newestMail ? newestMail.occurredAt : null,
       online: instances.length > 0,
       instances,
       blocked: this.info.blocked && now - this.info.blocked.lastAt < BLOCKED_NOTICE_MS ? this.info.blocked : null
@@ -549,6 +612,7 @@ export class ProjectLog {
     this.jobs.enforceRetention();
     this.logs.enforceRetention();
     this.dumps.enforceRetention();
+    this.mails.enforceRetention();
   }
 
   static _requestOptions(info, limits) {
@@ -565,6 +629,10 @@ export class ProjectLog {
 
   static _dumpOptions(info, limits) {
     return { maxEntries: limits.maxDumps, segmentSize: Math.max(10, Math.ceil(limits.maxDumps / 4)), seqBase: info.dumpSeqBase || 1, pick: pickDump };
+  }
+
+  static _mailOptions(info, limits) {
+    return { maxEntries: limits.maxMails, segmentSize: Math.max(10, Math.ceil(limits.maxMails / 4)), seqBase: info.mailSeqBase || 1, pick: pickMail };
   }
 
   static _exceptionOptions(info, limits) {
@@ -594,6 +662,8 @@ function pickSummary(source) {
   // Stored before route patterns were recorded, or from a framework that doesn't name them.
   if (summary.route === undefined) summary.route = null;
   if (summary.handler === undefined) summary.handler = null;
+  // Stored before replays, or not a replay.
+  if (summary.replayOf === undefined) summary.replayOf = null;
   return summary;
 }
 
@@ -610,6 +680,12 @@ function pickException(source) {
 function pickJob(source) {
   const summary = {};
   for (const field of JOB_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
+  return summary;
+}
+
+function pickMail(source) {
+  const summary = {};
+  for (const field of MAIL_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
   return summary;
 }
 

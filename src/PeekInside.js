@@ -26,10 +26,12 @@
 import { ExchangeRecorder } from './capture/exchange-recorder.js';
 import { splitUrl } from './capture/http-message.js';
 import { isIgnoredPath } from './capture/ignored-paths.js';
+import { readReplay } from './capture/replay.js';
 import { LOG_PREFIX, VERSION, settings } from './config.js';
 import { TrafficClassifier } from './deployment.js';
 import { ExceptionCapture } from './exceptions/exception-capture.js';
 import { DumpCapture } from './dumps/dump-capture.js';
+import { MailCapture } from './mail/mail-capture.js';
 import { ProcessMonitor } from './exceptions/process-monitor.js';
 import { RequestContext } from './exceptions/request-context.js';
 import { Instrumentation } from './instrumentation/index.js';
@@ -61,6 +63,7 @@ const DEFAULT_OPTIONS = {
   sourceMaps: true,
   runtime: true,
   captureJobs: true,
+  captureMail: true,
   logLevel: 'info',
   timeline: true,
   ...TIMELINE_DEFAULTS
@@ -127,6 +130,8 @@ class PeekInside {
    *   page records
    * @param {boolean} [options.captureJobs=true] - Runs of node-cron, cron, BullMQ and
    *   @nestjs/schedule jobs
+   * @param {boolean} [options.captureMail=true] - Emails sent with nodemailer, previewed on the
+   *   local dashboard's Mail page (never sent to PeekInside Cloud)
    * @param {boolean} [options.queryParams=true] - Keep the (masked) values sent with queries
    * @param {number} [options.slowQueryMs=100] - Queries this slow or slower are flagged
    * @param {number} [options.nPlusOneThreshold=5] - A statement run this many times in one request
@@ -170,10 +175,11 @@ class PeekInside {
     this._sampler = null;
     // The requests this instance serves, counted for its process samples.
     this._requests = null;
-    // Log lines for the Logs page, job runs, and dumps (local mode only).
+    // Log lines for the Logs page, job runs, and dumps and emails (local mode only).
     this._logs = null;
     this._jobs = null;
     this._dumps = null;
+    this._mails = null;
     this._servers = new ServerBinder(this, { onListening: (port) => this._onAppListening(port) });
 
     const environment = this.options.environment || settings.environment();
@@ -248,6 +254,9 @@ class PeekInside {
       }
       if (this._local) {
         this._dumps = new DumpCapture({ capture: this._exceptions, sink: () => this._transport, isEnabled: () => this.isEnabled });
+        if (this.options.captureMail !== false) {
+          this._mails = new MailCapture({ capture: this._exceptions, sink: () => this._transport, isEnabled: () => this.isEnabled });
+        }
       }
       this._jobs = new JobRunner({
         capture: this._exceptions,
@@ -260,7 +269,8 @@ class PeekInside {
         queries: Boolean(this._timeline && this._timeline.captureQueries),
         outgoing: Boolean(this._timeline && this._timeline.captureOutgoing),
         logs,
-        jobs: this.options.captureJobs !== false
+        jobs: this.options.captureJobs !== false,
+        mail: Boolean(this._mails)
       });
     }
   }
@@ -748,6 +758,8 @@ class PeekInside {
     const requests = this._requests;
     const recorder = new ExchangeRecorder(req, res, target, {
       maxBodySize: () => this.options.maxBodySize,
+      // A replay from the local dashboard takes the id the hub gave it (see capture/replay.js).
+      replay: this._local ? readReplay(req.headers) : null,
       onExchange: (exchange) => {
         // Exceptions and timeline first: the record is built from the completed exchange.
         if (context) {

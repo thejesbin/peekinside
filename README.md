@@ -30,7 +30,7 @@
 
 PeekInside records what your app does with each request (the response, the exception, the database queries, the outgoing calls and the log lines) and what your background jobs do, and shows it in a dashboard: free on your machine while you develop, and encrypted end to end on PeekInside Cloud for your servers.
 
-If you know Laravel Telescope, this is Telescope for Node.js: requests, exceptions, queries with N+1 detection, outgoing HTTP calls, logs, jobs and dumps, for Express, NestJS, Fastify, Koa and Hono.
+If you know Laravel Telescope, this is Telescope for Node.js: requests, exceptions, queries with N+1 detection, outgoing HTTP calls, logs, jobs, dumps and mail, for Express, NestJS, Fastify, Koa and Hono.
 
 ## Quick start
 
@@ -76,12 +76,13 @@ Open it and use your app: requests show up as they happen. To check the setup be
 - **Logs:** from the console, pino, winston and NestJS's Logger, on the timeline of the request that wrote them.
 - **Jobs:** node-cron, cron, BullMQ and `@nestjs/schedule`, or your own with `PeekInside.job()`. A scheduled job that misses its run is flagged.
 - **Dumps:** `PeekInside.dump(value)` shows a value in the dashboard instead of your terminal, as a tree you can open, under the request it belongs to.
+- **Emails:** every email sent with nodemailer, previewed in the local dashboard as a phone or a desktop shows it, with its text and recipients, linked to the request that sent it.
 - **Runtime:** memory, CPU and event-loop delay over time, and the requests in flight when the event loop was blocked.
 - **Who and which deploy:** the user each request was for (`PeekInside.setUser()`) and the release each error came from.
 
 ## On your machine, and on your servers
 
-**The local dashboard** is free, needs no account, and keeps what it records on your machine. The first app that needs it starts it in the background, and every app on your machine that uses PeekInside shows up in it as a project. It's for development: it's off when `NODE_ENV` is `production`.
+**The local dashboard** is free, needs no account, and keeps what it records on your machine. The first app that needs it starts it in the background, and every app on your machine that uses PeekInside shows up in it as a project. Once you've fixed a bug, **[Replay](https://www.peekinside.dev/docs/dashboard#replay-a-request)** sends the request that failed to your app again and opens the two side by side. It's for development: it's off when `NODE_ENV` is `production`.
 
 **[PeekInside Cloud](https://www.peekinside.dev/docs/cloud)** is the same dashboard for your servers and your team. Set `PEEKINSIDE_API_KEY` on a server and the same `PeekInside.attach()` sends there. What it sends is encrypted on your server and decrypted in your browser, so PeekInside Cloud only ever stores ciphertext. With Pro and up, alerts reach you by email or Slack. No card is needed to start: see [pricing](https://www.peekinside.dev/#pricing).
 

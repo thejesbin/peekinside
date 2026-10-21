@@ -203,6 +203,17 @@ export class SegmentLog {
   }
 
   /**
+   * The summary of one record, as lists show it.
+   *
+   * @param {string} id
+   * @returns {Object|null} null when it is no longer stored
+   */
+  summary(id) {
+    const entry = this.byId.get(id);
+    return entry ? this.pick(entry) : null;
+  }
+
+  /**
    * The detail of one record, read from disk.
    *
    * @param {string} id

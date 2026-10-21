@@ -17,6 +17,7 @@ import { ApiKey, Sealer, SyncSealer } from '../crypto.js';
 import { RequestContext } from '../exceptions/request-context.js';
 import { ExceptionRecord } from '../exceptions/exception-record.js';
 import { DumpRecord } from '../dumps/dump-record.js';
+import { MailRecord } from '../mail/mail-record.js';
 import { JobRunRecord } from '../jobs/job-run-record.js';
 import { LogRecord } from '../logs/log-record.js';
 import { RequestRecord } from '../record.js';
@@ -132,13 +133,14 @@ export class CloudTransport extends BatchTransport {
   }
 
   /**
-   * Queues a record for sending. Dumps are for the local dashboard: PeekInside Cloud never gets them.
+   * Queues a record for sending. Dumps and emails are for the local dashboard: PeekInside Cloud
+   * never gets them.
    *
    * @param {Object} record
    * @returns {void}
    */
   enqueueRecord(record) {
-    if (record instanceof DumpRecord) return;
+    if (record instanceof DumpRecord || record instanceof MailRecord) return;
     super.enqueueRecord(record);
   }
 

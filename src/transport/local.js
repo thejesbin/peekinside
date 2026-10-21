@@ -182,7 +182,7 @@ export class LocalTransport extends BatchTransport {
       const records = fatal ? [...this.sending, ...this.queue.splice(0)] : [];
       for (const exchange of exchanges) records.push(RequestRecord.fromExchange(exchange, this.environment, this.release));
       records.push(...exceptions);
-      const { requests, exceptions: errors, jobs, logs, dumps } = BatchTransport.split(records);
+      const { requests, exceptions: errors, jobs, logs, dumps, mails } = BatchTransport.split(records);
       Spool.local(settings.dataDir(), this.project.id).write({
         project: this.project,
         instance: this.instance,
@@ -190,7 +190,8 @@ export class LocalTransport extends BatchTransport {
         exceptions: errors.slice(-MAX_SPOOLED_EXCEPTIONS),
         jobs: jobs.slice(-MAX_SPOOLED_EXCEPTIONS),
         logs: logs.slice(-MAX_SPOOLED_REQUESTS),
-        dumps: dumps.slice(-MAX_SPOOLED_EXCEPTIONS)
+        dumps: dumps.slice(-MAX_SPOOLED_EXCEPTIONS),
+        mails: mails.slice(-MAX_SPOOLED_EXCEPTIONS)
       });
     } catch (error) {
       // A data folder that can't be written loses the records, never the app.
@@ -208,14 +209,15 @@ export class LocalTransport extends BatchTransport {
     }
     const blocked = this.blocked.take();
     const samples = this.takeSamples();
-    const { requests, exceptions, jobs, logs, dumps } = BatchTransport.split(batch);
+    const { requests, exceptions, jobs, logs, dumps, mails } = BatchTransport.split(batch);
     try {
       const answer = await this.hub.request('POST', '/api/ingest', {
-        body: { project: this.project, instance: this.instance, requests, exceptions, jobs, logs, dumps, samples, blocked: blocked.map(([, entry]) => entry) }
+        body: { project: this.project, instance: this.instance, requests, exceptions, jobs, logs, dumps, mails, samples, blocked: blocked.map(([, entry]) => entry) }
       });
       if (exceptions.length && answer.acceptedExceptions === undefined) this._noteOutdatedHub();
       else if ((jobs.length || logs.length) && answer.acceptedJobs === undefined) this._noteOutdatedHub();
       else if (dumps.length && answer.acceptedDumps === undefined) this._noteOutdatedHub();
+      else if (mails.length && answer.acceptedMails === undefined) this._noteOutdatedHub();
       return true;
     } catch (error) {
       if (error.code === 'NOT_HUB') {
@@ -240,7 +242,7 @@ export class LocalTransport extends BatchTransport {
   }
 
   // A hub started before this version keeps running until it is restarted, and ignores what it
-  // doesn't know (exceptions, job runs, log lines, dumps).
+  // doesn't know (exceptions, job runs, log lines, dumps, emails).
   _noteOutdatedHub() {
     if (this.outdatedHubNoted) return;
     this.outdatedHubNoted = true;

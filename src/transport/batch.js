@@ -14,6 +14,7 @@ import { LOG_PREFIX } from '../config.js';
 import { ExceptionRecord } from '../exceptions/exception-record.js';
 import { RequestContext } from '../exceptions/request-context.js';
 import { DumpRecord } from '../dumps/dump-record.js';
+import { MailRecord } from '../mail/mail-record.js';
 import { JobRunRecord } from '../jobs/job-run-record.js';
 import { LogRecord } from '../logs/log-record.js';
 import { RequestRecord } from '../record.js';
@@ -161,10 +162,11 @@ export class BatchTransport {
   deliverNow({ exceptions, exchanges, fatal }) {}
 
   /**
-   * Splits records into the lists payloads have: requests, exceptions, job runs and log lines.
+   * Splits records into the lists payloads have: requests, exceptions, job runs, log lines, dumps
+   * and emails.
    *
-   * @param {Array<RequestRecord|ExceptionRecord|JobRunRecord|LogRecord>} records
-   * @returns {{ requests: RequestRecord[], exceptions: ExceptionRecord[], jobs: JobRunRecord[], logs: LogRecord[] }}
+   * @param {Array<RequestRecord|ExceptionRecord|JobRunRecord|LogRecord|DumpRecord|MailRecord>} records
+   * @returns {{ requests: RequestRecord[], exceptions: ExceptionRecord[], jobs: JobRunRecord[], logs: LogRecord[], dumps: DumpRecord[], mails: MailRecord[] }}
    */
   static split(records) {
     const requests = [];
@@ -172,14 +174,16 @@ export class BatchTransport {
     const jobs = [];
     const logs = [];
     const dumps = [];
+    const mails = [];
     for (const record of records) {
       if (record instanceof ExceptionRecord) exceptions.push(record);
       else if (record instanceof JobRunRecord) jobs.push(record);
       else if (record instanceof LogRecord) logs.push(record);
       else if (record instanceof DumpRecord) dumps.push(record);
+      else if (record instanceof MailRecord) mails.push(record);
       else requests.push(record);
     }
-    return { requests, exceptions, jobs, logs, dumps };
+    return { requests, exceptions, jobs, logs, dumps, mails };
   }
 
   /**
