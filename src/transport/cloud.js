@@ -3,7 +3,9 @@
  *
  * Records are queued in memory and sent in batches from a background timer, never on the request
  * path. Network failures are retried with backoff; when the queue is full the oldest records are
- * dropped. An invalid key or an inactive plan stops sending (logged once).
+ * dropped. An invalid key stops sending (logged once). While PeekInside Cloud is paused for the
+ * project's organization (its plan ended), nothing is recorded and it is asked again every two
+ * minutes, so sending resumes on its own once the organization has a plan.
  *
  * A crashing process can't wait for the timer: the crash is sealed synchronously and posted from
  * a short-lived child process the app waits for (spawnSync). If that fails, the sealed batch is
@@ -12,7 +14,7 @@
 
 import { spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
-import { settings } from '../config.js';
+import { LOG_PREFIX, settings } from '../config.js';
 import { ApiKey, Sealer, SyncSealer } from '../crypto.js';
 import { RequestContext } from '../exceptions/request-context.js';
 import { ExceptionRecord } from '../exceptions/exception-record.js';
@@ -37,6 +39,9 @@ const EXIT_TIMEOUT_MS = 2500;
 const MAX_POST_BYTES = 4 * 1024 * 1024;
 const FIRST_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
+// While PeekInside Cloud is paused for the project's organization, it is asked this often whether
+// it accepts data again.
+const PAUSE_CHECK_MS = 2 * 60_000;
 // A crash waits this long for its batch to be sent before spooling it.
 const CRASH_SEND_TIMEOUT_MS = 3000;
 // Queued records sent along with a crash, at most (sealed JSON); the crash itself always goes.
@@ -129,6 +134,11 @@ export class CloudTransport extends BatchTransport {
     // What PeekInside Cloud says this project's plan includes (heap and CPU profiles), from its answers.
     this.features = null;
     this.featureListeners = [];
+    // Set while PeekInside Cloud is paused for the project's organization (see _pause).
+    this.paused = false;
+    this.pauseCheckMs = PAUSE_CHECK_MS;
+    this._pauseTimer = null;
+    this.stopped = false;
     // Set when records that didn't fit in the last POST wait for the next one.
     this._more = false;
     // Batches spooled by an earlier run that crashed.
@@ -154,9 +164,12 @@ export class CloudTransport extends BatchTransport {
    * @returns {void}
    */
   stop() {
+    this.stopped = true;
     clearInterval(this.timer);
     clearTimeout(this._resendTimer);
+    clearTimeout(this._pauseTimer);
     this._resendTimer = null;
+    this._pauseTimer = null;
     this.rules.stop();
     super.stop();
   }
@@ -281,6 +294,7 @@ export class CloudTransport extends BatchTransport {
     const sent = batch.length - rest.length;
 
     if (response.ok) {
+      if (this.paused) this._resume();
       // PeekInside Cloud answers: from now on, the alert rules it holds are checked here too.
       this.rules.start();
       const answer = await response.json().catch(() => null);
@@ -290,7 +304,11 @@ export class CloudTransport extends BatchTransport {
     }
 
     const reason = await response.json().then((answer) => answer.error, () => '') || `HTTP ${response.status}`;
-    if (response.status === 401 || response.status === 402 || response.status === 403) {
+    if (response.status === 402) {
+      this._pause(reason);
+      return false;
+    }
+    if (response.status === 401 || response.status === 403) {
       this._disable(`${reason} Requests are no longer sent to PeekInside Cloud until the app restarts.`);
       return false;
     }
@@ -329,6 +347,64 @@ export class CloudTransport extends BatchTransport {
     }
   }
 
+  // PeekInside Cloud is paused for the project's organization: its free days or its plan ended.
+  // Nothing is recorded meanwhile and the profilers stop; every two minutes PeekInside Cloud is
+  // asked again (see _checkPause), so sending resumes on its own once the organization has a plan.
+  _pause(reason) {
+    this.disabled = true;
+    this.queue = [];
+    this.samples = [];
+    this.heapWindows = [];
+    this.blockWindows = [];
+    if (!this.paused) {
+      this.paused = true;
+      this.rules.stop();
+      this._setFeatures({ heapProfiling: false, cpuProfiling: false });
+      this._logDisabled(`${LOG_PREFIX} ${reason} Nothing is recorded meanwhile: PeekInside checks again every ${PAUSE_CHECK_MS / 60_000} minutes and resumes on its own.`);
+    }
+    this._schedulePauseCheck();
+  }
+
+  // A batch was accepted again. Its answer restarts the profilers the plan includes, and batches
+  // spooled by a crash, which waited, go too.
+  _resume() {
+    this.paused = false;
+    console.log(`${LOG_PREFIX} PeekInside Cloud accepts data for this project's organization again: sending resumed.`);
+    this._scheduleResend(SPOOL_RESEND_DELAY_MS);
+  }
+
+  _schedulePauseCheck() {
+    clearTimeout(this._pauseTimer);
+    this._pauseTimer = null;
+    if (this.stopped) return;
+    this._pauseTimer = RequestContext.outside(() => setTimeout(() => {
+      this._pauseTimer = null;
+      void this._checkPause();
+    }, this.pauseCheckMs));
+    if (typeof this._pauseTimer.unref === 'function') this._pauseTimer.unref();
+  }
+
+  // Asks with a batch of nothing, so no data is sent: PeekInside Cloud checks the plan before it
+  // reads a batch, so it answers 402 while the organization is paused, and 400 (nothing to store)
+  // once it isn't. Then recording resumes, and the next batch it accepts ends the pause.
+  async _checkPause() {
+    let response;
+    try {
+      response = await this._post(JSON.stringify({ events: [] }));
+    } catch (error) {
+      this._schedulePauseCheck();
+      return;
+    }
+    const reason = await response.json().then((answer) => answer.error, () => '') || `HTTP ${response.status}`;
+    if (response.status === 401 || response.status === 403) {
+      this._disable(`${reason} Requests are no longer sent to PeekInside Cloud until the app restarts.`);
+    } else if (response.ok || response.status === 400) {
+      this.disabled = false;
+    } else {
+      this._schedulePauseCheck();
+    }
+  }
+
   // Ending while waiting to retry after a failure: what's queued is spooled rather than lost.
   _onBackingOff() {
     if (this.exiting) this._spoolQueue();
@@ -358,7 +434,7 @@ export class CloudTransport extends BatchTransport {
     }
   }
 
-  // An invalid key or an inactive plan loses every request from now on: an error, not a warning.
+  // An invalid key or a paused plan loses requests: an error, not a warning.
   _logDisabled(line) {
     console.error(line);
   }

@@ -42,10 +42,15 @@ process.env.PEEKINSIDE_HUB_PORT = String(await new Promise((resolve) => {
   });
 }));
 
-// The fake PeekInside Cloud: records every batch it is sent, or answers 503 while `down`.
+// The fake PeekInside Cloud: records every batch it is sent, or answers 503 while `down`. Like
+// PeekInside Cloud, it checks the plan before the batch: while `paused` it answers 402 (keeping
+// what it was sent in `refused`), and it refuses a batch with nothing in it.
 const batches = [];
+const refused = [];
 let down = false;
+let paused = false;
 let answer = { accepted: true };
+const LISTS = ['events', 'exceptions', 'jobs', 'logs', 'samples', 'heapWindows', 'blockWindows'];
 const ingest = http.createServer((req, res) => {
   let body = '';
   req.setEncoding('utf8');
@@ -55,7 +60,17 @@ const ingest = http.createServer((req, res) => {
       res.writeHead(503, { 'content-type': 'application/json' });
       return res.end('{"error":"down"}');
     }
-    batches.push({ headers: req.headers, body: JSON.parse(body), bytes: Buffer.byteLength(body) });
+    const parsed = JSON.parse(body);
+    if (paused) {
+      refused.push(parsed);
+      res.writeHead(402, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'PeekInside Cloud is paused for this project\'s organization. Choose a plan to keep sending data.' }));
+    }
+    if (!LISTS.some((list) => Array.isArray(parsed[list]) && parsed[list].length)) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      return res.end('{"error":"Send at least one event, exception, job run, log line or sample"}');
+    }
+    batches.push({ headers: req.headers, body: parsed, bytes: Buffer.byteLength(body) });
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(answer));
   });
@@ -324,6 +339,65 @@ test('heap and CPU profiles run once PeekInside Cloud says the plan includes the
   } finally {
     answer = { accepted: true };
     peekInside.stop();
+  }
+});
+
+test('while PeekInside Cloud is paused for the organization, nothing is recorded; sending resumes on its own once it has a plan', async () => {
+  batches.length = 0;
+  refused.length = 0;
+  paused = true;
+  answer = { accepted: true, features: { heapProfiling: false, cpuProfiling: true } };
+  const app = express();
+  app.set('env', 'test');
+  const { log, error } = console;
+  const lines = [];
+  console.log = (line) => lines.push(String(line));
+  console.error = (line) => lines.push(String(line));
+  const peekInside = PeekInside.attach(app, { apiKey: API_KEY, local: false });
+  const transport = peekInside._cloud;
+  transport.pauseCheckMs = 100;
+  app.get('/orders/:id', (req, res) => res.json({ id: req.params.id }));
+  const server = app.listen(0, '127.0.0.1');
+  const get = (url) => new Promise((resolve) => http.get({ host: '127.0.0.1', port: server.address().port, path: url }, (res) => res.resume().on('end', resolve)));
+  const probes = () => refused.filter((body) => JSON.stringify(body) === '{"events":[]}').length;
+  try {
+    await new Promise((resolve) => server.once('listening', resolve));
+    assert.equal(peekInside._blocks.running, true);
+    await get('/orders/1');
+    await waitFor(() => {
+      void peekInside.flush();
+      return transport.paused;
+    }, 'the pause');
+    assert.equal(transport.disabled, true, 'nothing is recorded meanwhile');
+    assert.equal(peekInside._blocks.running, false, 'and the profilers stop');
+    await get('/orders/2');
+    assert.equal(transport.queue.length, 0);
+
+    // PeekInside Cloud is asked again, with no data, until the organization has a plan.
+    await waitFor(() => probes() >= 2, 'checks while paused');
+    assert.equal(transport.disabled, true);
+    assert.equal(batches.length, 0);
+    assert.equal(lines.filter((line) => line.includes('is paused')).length, 1, 'the pause is logged once');
+
+    paused = false;
+    await waitFor(() => !transport.disabled, 'recording to resume');
+    await get('/orders/3');
+    const batch = await waitFor(() => {
+      void peekInside.flush();
+      return batches.find((item) => item.body.events.length);
+    }, 'a batch after the pause');
+    const urls = await Promise.all(batch.body.events.map(async (event) => (await openEvent(event)).summary.url));
+    assert.deepEqual(urls, ['/orders/3'], 'what happened while paused is not sent');
+    assert.equal(transport.paused, false);
+    assert.equal(lines.filter((line) => line.includes('sending resumed')).length, 1);
+    assert.equal(peekInside._blocks.running, true, 'the plan\'s profilers start again');
+  } finally {
+    paused = false;
+    answer = { accepted: true };
+    console.log = log;
+    console.error = error;
+    peekInside.stop();
+    server.close();
   }
 });
 
