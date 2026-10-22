@@ -1,6 +1,6 @@
 {
   "name": "peekinside",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Debug Node.js from the inside, like Laravel Telescope: every error with the request, queries, logs and jobs behind it, for Express, NestJS, Fastify, Koa and Hono. A free local dashboard, and encrypted monitoring for production",
   "main": "index.js",
   "types": "./index.d.ts",

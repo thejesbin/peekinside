@@ -74,7 +74,8 @@ export class BatchTransport {
     // The attempt in progress, shared by concurrent flush() calls, and the records it sends.
     this.inflight = null;
     this.sending = [];
-    // Set once the destination refused this process for good.
+    // Set while the destination refuses this process: for good, or, in cloud mode, while PeekInside
+    // Cloud is paused for the project's organization (see CloudTransport#_pause).
     this.disabled = false;
     // Current wait after consecutive failures, and the earliest time of the next attempt (ms).
     this.backoff = 0;
