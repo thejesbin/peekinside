@@ -25,11 +25,13 @@ export class HubError extends Error {
    * @param {Object} [details]
    * @param {number} [details.status=0] - HTTP status, when there was an answer
    * @param {string} [details.code=''] - Failure code
+   * @param {Object|null} [details.body=null] - The hub's answer, when it was JSON
    */
-  constructor(message, { status = 0, code = '' } = {}) {
+  constructor(message, { status = 0, code = '', body = null } = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -66,15 +68,16 @@ export class HubClient {
    * @param {Object} [options]
    * @param {*} [options.body] - Sent as JSON
    * @param {number} [options.timeout=5000] - Milliseconds without activity before giving up
+   * @param {Object<string, string>} [options.headers] - More headers
    * @returns {Promise<Object>} Parsed response body; rejects with HubError for non-2xx answers,
    *   answers that are not JSON (code NOT_HUB) and network errors
    */
-  request(method, pathname, { body, timeout = 5000 } = {}) {
+  request(method, pathname, { body, timeout = 5000, headers: extra = {} } = {}) {
     return new Promise((resolve, reject) => {
       const payload = body === undefined ? null : JSON.stringify(body);
       // The hub accepts ingest only with this header, which browsers can't send cross-site
       // without a preflight the hub never answers.
-      const headers = { 'x-peekinside-sdk': VERSION || 'dev', accept: 'application/json' };
+      const headers = { ...extra, 'x-peekinside-sdk': VERSION || 'dev', accept: 'application/json' };
       if (payload !== null) {
         headers['content-type'] = 'application/json';
         headers['content-length'] = Buffer.byteLength(payload);
@@ -93,7 +96,7 @@ export class HubClient {
           }
           if (res.statusCode >= 200 && res.statusCode < 300 && parsed) return resolve(parsed);
           const message = (parsed && parsed.error) || `HTTP ${res.statusCode}`;
-          reject(new HubError(message, { status: res.statusCode, code: parsed ? 'HUB_ERROR' : 'NOT_HUB' }));
+          reject(new HubError(message, { status: res.statusCode, code: parsed ? 'HUB_ERROR' : 'NOT_HUB', body: parsed }));
         });
         res.on('error', (error) => reject(new HubError(error.message, { code: error.code })));
       });

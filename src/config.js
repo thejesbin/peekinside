@@ -12,6 +12,7 @@
  *   PEEKINSIDE_MAX_REQUESTS  Requests the local dashboard keeps per project (default 1000)
  *   PEEKINSIDE_MAX_EXCEPTIONS  Exceptions the local dashboard keeps per project (default 500)
  *   PEEKINSIDE_API_KEY       PeekInside Cloud API key; turns on cloud mode
+ *   PEEKINSIDE_MCP_KEY       MCP key: `npx peekinside mcp` reads that PeekInside Cloud project (cli.js)
  *   PEEKINSIDE_ENV           Environment label (falls back to NODE_ENV)
  *   PEEKINSIDE_PROJECT       Project name in the local dashboard
  *   PEEKINSIDE_LOCAL         1 or 0 to force the local dashboard on or off

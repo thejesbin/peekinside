@@ -33,6 +33,9 @@
  *   GET    /api/projects/:id/exception-state   Resolved issues, with a version
  *   PUT    /api/projects/:id/exception-state   Save them, if the version is still the current one
  *   DELETE /api/projects/:id                   Forget a project
+ *   POST   /mcp                                The Model Context Protocol, for AI tools (Streamable
+ *                                              HTTP, answers in JSON): see mcp/. ?project=<id> names
+ *                                              the project tools read when they aren't told
  *   GET    /brand/<file>                       The PeekInside mark, for the page's icon (also
  *                                              /favicon.svg and /favicon.ico)
  *
@@ -50,12 +53,17 @@ import { ExceptionState } from './exception-state.js';
 import { IngestPayload, REQUEST_ID } from './ingest-payload.js';
 import { DEFAULT_REPLAY_TIMEOUT_MS, Replay, ReplayError } from './replay.js';
 import { DEFAULT_MAX_DUMPS, DEFAULT_MAX_MAILS, PROJECT_ID } from './store.js';
+import { McpServer } from '../mcp/server.js';
+import { StoreSource } from '../mcp/sources.js';
+import { Toolbox } from '../mcp/tools.js';
 
 const MAX_INGEST_BYTES = 32 * 1024 * 1024;
 // 5000 fingerprints with their timestamps take about 200 KB.
 const MAX_STATE_BYTES = 1024 * 1024;
 // A replay names one request.
 const MAX_REPLAY_BYTES = 4096;
+// An MCP message names a tool and its arguments.
+const MAX_MCP_BYTES = 1024 * 1024;
 const DEFAULT_PAGE = 500;
 const MAX_PAGE = 1000;
 // /api/projects/:id, then optionally a collection and an item.
@@ -172,7 +180,9 @@ export class HubServer {
       maxDumps: DEFAULT_MAX_DUMPS,
       maxMails: DEFAULT_MAX_MAILS,
       // Tells the dashboard this hub replays requests (older ones don't).
-      replay: true
+      replay: true,
+      // And that it serves AI tools at /mcp.
+      mcp: true
     };
   }
 
@@ -200,6 +210,14 @@ export class HubServer {
     if (pathname === '/api/ingest') {
       this.onActivity();
       return this._ingest(req, res);
+    }
+    if (pathname === '/mcp') {
+      // AI tools aren't browsers: a page of another site can't use it, as for the API.
+      if (!isSameOrigin(req, host)) {
+        return sendJson(res, 403, { error: 'Only AI tools on this machine can use this endpoint.' });
+      }
+      this.onActivity();
+      return this._mcp(req, res, searchParams);
     }
     if (pathname.startsWith('/api/')) {
       if (!isSameOrigin(req, host)) {
@@ -462,6 +480,49 @@ export class HubServer {
       if (error instanceof ReplayError) return sendJson(res, error.status, { error: error.message });
       throw error;
     }
+  }
+
+  // POST /mcp: one MCP message (or a batch). Answers in JSON; notifications get 202 and no body.
+  async _mcp(req, res, query) {
+    if (req.method !== 'POST') {
+      return methodNotAllowed(res, 'POST');
+    }
+    if (!/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) {
+      return sendJson(res, 415, { error: 'Expected application/json' });
+    }
+    let message;
+    try {
+      message = JSON.parse(await readBody(req, MAX_MCP_BYTES));
+    } catch (error) {
+      if (error && error.status === 413) {
+        res.setHeader('Connection', 'close');
+        return sendJson(res, 413, { error: 'Too large' });
+      }
+      return sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+    }
+    const response = await this._mcpServer(query.get('project')).handle(message);
+    if (!response) {
+      send(res, 202, '', { 'Cache-Control': 'no-store' });
+      return undefined;
+    }
+    return sendJson(res, 200, response);
+  }
+
+  // One MCP server per default project, so what a tool reads is reused by the next call.
+  _mcpServer(project) {
+    const key = project && PROJECT_ID.test(project) ? project : '';
+    this._mcpServers = this._mcpServers || new Map();
+    let server = this._mcpServers.get(key);
+    if (!server) {
+      const source = new StoreSource(this.store, {
+        dashboardUrl: `http://localhost:${this.port}`,
+        replay: (stored) => Replay.run(stored, { timeoutMs: this.replayTimeoutMs })
+      });
+      server = new McpServer({ toolbox: new Toolbox({ source, project: key || null, cwd: null }), version: this.version });
+      if (this._mcpServers.size >= 20) this._mcpServers.delete(this._mcpServers.keys().next().value);
+      this._mcpServers.set(key, server);
+    }
+    return server;
   }
 
   // /api/projects/:id/exceptions

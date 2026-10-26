@@ -3,13 +3,16 @@
  *
  * Mirrors the dashboard's implementation: ephemeral ECDH P-256, HKDF-SHA-256 and AES-256-GCM,
  * all from Node's Web Crypto. Events are sealed to the project's public key, so only browsers
- * holding the project's private key can read them; this process can encrypt but never decrypt.
+ * holding the project's private key can read them; apps encrypt but never decrypt.
+ *
+ * The one exception is `npx peekinside mcp` with an MCP key (see McpKey): the key unwraps the
+ * project's private key on the developer's machine, so their AI tools can read the project there.
  *
  * Output: "v1.<ephemeral public key>.<iv>.<ciphertext>" (base64url parts). Any change here must
  * stay byte-compatible with the dashboard, or existing projects can no longer read their events.
  */
 
-import { createCipheriv, createECDH, hkdfSync, randomBytes, webcrypto } from 'crypto';
+import { createCipheriv, createDecipheriv, createECDH, createHash, createPrivateKey, createPublicKey, hkdfSync, randomBytes, webcrypto } from 'crypto';
 
 const subtle = webcrypto.subtle;
 const ECDH = { name: 'ECDH', namedCurve: 'P-256' };
@@ -18,6 +21,11 @@ const encoder = new TextEncoder();
 const PROJECT_ID = /^p[0-9a-z]{12}$/;
 const SECRET = /^[A-Za-z0-9_-]{43}$/;
 const PUBLIC_KEY = /^[A-Za-z0-9_-]{87}$/;
+const MCP_KEY_ID = /^m[0-9a-z]{16}$/;
+// A project key wrapped for an MCP key: "m1.<iv>.<ciphertext and tag>".
+const MCP_WRAP = /^m1\.([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{24,})$/;
+// Ephemeral keys an Opener remembers the agreed key of.
+const MAX_OPENER_KEYS = 2000;
 
 /**
  * @param {Uint8Array|ArrayBuffer} bytes
@@ -209,5 +217,212 @@ export class ApiKey {
   static unquote(value) {
     const text = String(value).trim();
     return /^(["'`]).*\1$/s.test(text) && text.length > 1 ? text.slice(1, -1).trim() : text;
+  }
+}
+
+/** A ciphertext that doesn't open: wrong key, wrong record, wrong purpose, or tampered with. */
+export class DecryptionError extends Error {
+  constructor(message = "Couldn't decrypt") {
+    super(message);
+    this.name = 'DecryptionError';
+  }
+}
+
+/**
+ * Decrypts what was sealed to one key pair, for one purpose: the dashboard's Opener. The key agreed
+ * with each ephemeral key is cached, so a batch sealed together costs one key agreement.
+ */
+export class Opener {
+  /**
+   * @param {CryptoKey} privateKey - The recipient's private key (ECDH P-256)
+   * @param {string} publicKey - Its public key (base64url, uncompressed point): part of every
+   *   message key
+   * @param {string} purpose - "event"
+   */
+  constructor(privateKey, publicKey, purpose) {
+    this._privateKey = privateKey;
+    this._recipient = fromBase64Url(publicKey);
+    this._purpose = purpose;
+    this._keys = new Map();
+  }
+
+  /**
+   * @param {string} sealed - "v1.<ephemeral public key>.<iv>.<ciphertext>"
+   * @param {string} aad - What it was sealed with, such as "detail:<request id>"
+   * @returns {Promise<Uint8Array>}
+   * @throws {DecryptionError}
+   */
+  async open(sealed, aad) {
+    const parts = typeof sealed === 'string' ? sealed.split('.') : [];
+    if (parts.length !== 4 || parts[0] !== 'v1') throw new DecryptionError('Unsupported ciphertext format');
+    try {
+      const plaintext = await subtle.decrypt(
+        { name: 'AES-GCM', iv: fromBase64Url(parts[2]), additionalData: encoder.encode(aad) },
+        await this._keyFor(parts[1]),
+        fromBase64Url(parts[3])
+      );
+      return new Uint8Array(plaintext);
+    } catch (error) {
+      throw new DecryptionError();
+    }
+  }
+
+  /**
+   * @param {string} sealed
+   * @param {string} aad
+   * @returns {Promise<*>} The parsed JSON
+   * @throws {DecryptionError}
+   */
+  async openJson(sealed, aad) {
+    const bytes = await this.open(sealed, aad);
+    try {
+      return JSON.parse(Buffer.from(bytes).toString('utf8'));
+    } catch (error) {
+      throw new DecryptionError('Not JSON');
+    }
+  }
+
+  _keyFor(ephemeral) {
+    let key = this._keys.get(ephemeral);
+    if (!key) {
+      key = (async () => {
+        const ephemeralRaw = fromBase64Url(ephemeral);
+        const ephemeralPublic = await subtle.importKey('raw', ephemeralRaw, ECDH, false, []);
+        const shared = await subtle.deriveBits({ name: 'ECDH', public: ephemeralPublic }, this._privateKey, 256);
+        const material = await subtle.importKey('raw', shared, 'HKDF', false, ['deriveKey']);
+        const salt = new Uint8Array(ephemeralRaw.length + this._recipient.length);
+        salt.set(ephemeralRaw, 0);
+        salt.set(this._recipient, ephemeralRaw.length);
+        return subtle.deriveKey(
+          { name: 'HKDF', hash: 'SHA-256', salt, info: encoder.encode(`peekinside/v1/${this._purpose}`) },
+          material,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+      })();
+      key.catch(() => this._keys.delete(ephemeral));
+      this._keys.set(ephemeral, key);
+      if (this._keys.size > MAX_OPENER_KEYS) this._keys.delete(this._keys.keys().next().value);
+    }
+    return key;
+  }
+}
+
+/**
+ * An MCP key: what `npx peekinside mcp` needs to read one PeekInside Cloud project for a member's
+ * AI tools, as "pim1.<projectId>.<keyId>.<secret>". A browser of the member makes it, and it's
+ * shown once. Mirrors the dashboard's McpKeys (e2ee.ts).
+ *
+ * The secret never reaches the server. Two keys are derived from it with HKDF-SHA-256: a proof,
+ * which the API checks against the hash it stores, and a wrapping key, with which the browser
+ * wrapped the project's private key (AES-256-GCM, bound to the project and the key's id). The API
+ * hands out the wrapped key, and only the holder of the secret can unwrap it, so records are still
+ * decrypted on the member's machine only.
+ */
+export class McpKey {
+  /**
+   * @param {Object} parts
+   * @param {string} parts.projectId - Project id, such as "p0123456789ab"
+   * @param {string} parts.keyId - Such as "m0123456789abcdef"
+   * @param {string} parts.secret - 32 random bytes, base64url
+   */
+  constructor({ projectId, keyId, secret }) {
+    this.projectId = projectId;
+    this.keyId = keyId;
+    this.secret = secret;
+  }
+
+  /**
+   * @param {string} value - Surrounding spaces and quotes are ignored
+   * @returns {McpKey|null} null when it isn't a well-formed v1 key
+   */
+  static parse(value) {
+    const [version, projectId, keyId, secret, ...rest] = ApiKey.unquote(value).split('.');
+    if (version !== 'pim1' || rest.length) return null;
+    if (!PROJECT_ID.test(projectId) || !MCP_KEY_ID.test(keyId) || !SECRET.test(secret)) return null;
+    return new McpKey({ projectId, keyId, secret });
+  }
+
+  /**
+   * What's wrong with a value that isn't an MCP key, in words. Never repeats the value.
+   *
+   * @param {string} value
+   * @returns {string}
+   */
+  static problem(value) {
+    const text = ApiKey.unquote(value);
+    if (text.startsWith('pik1.')) {
+      return 'PEEKINSIDE_MCP_KEY holds an API key, which can only send data. Make an MCP key in PeekInside Cloud, on the project\'s Settings page under AI tools (MCP).';
+    }
+    if (!text.startsWith('pim1.')) return 'PEEKINSIDE_MCP_KEY is not a PeekInside MCP key (those start with "pim1."). Make one in PeekInside Cloud, on the project\'s Settings page under AI tools (MCP).';
+    return 'PEEKINSIDE_MCP_KEY looks cut off or changed: copy the whole key, from "pim1." to its end.';
+  }
+
+  /**
+   * What the API checks: "pim1.<keyId>.<proof>", sent as a bearer token.
+   *
+   * @returns {string}
+   */
+  bearer() {
+    return `pim1.${this.keyId}.${toBase64Url(this._derive('peekinside/v1/mcp-proof'))}`;
+  }
+
+  /**
+   * Unwraps the project's private key, and works out its public key from it (rather than trusting
+   * the server's).
+   *
+   * @param {string} wrapped - "m1.<iv>.<ciphertext>", as the API hands it out
+   * @returns {Promise<{ privateKey: CryptoKey, publicKey: string }>}
+   * @throws {DecryptionError} When this key's secret doesn't open it
+   */
+  async unwrap(wrapped) {
+    const match = MCP_WRAP.exec(String(wrapped || ''));
+    if (!match) throw new DecryptionError('Unsupported key format');
+    const sealed = Buffer.from(match[2], 'base64url');
+    if (sealed.length <= 16) throw new DecryptionError('Unsupported key format');
+    let pkcs8;
+    try {
+      const decipher = createDecipheriv('aes-256-gcm', this._derive('peekinside/v1/mcp-key'), Buffer.from(match[1], 'base64url'));
+      decipher.setAAD(Buffer.from(McpKey.aad(this.projectId, this.keyId), 'utf8'));
+      decipher.setAuthTag(sealed.subarray(sealed.length - 16));
+      pkcs8 = Buffer.concat([decipher.update(sealed.subarray(0, sealed.length - 16)), decipher.final()]);
+    } catch (error) {
+      throw new DecryptionError("This MCP key doesn't open the project's key");
+    }
+    try {
+      const jwk = createPublicKey(createPrivateKey({ key: pkcs8, format: 'der', type: 'pkcs8' })).export({ format: 'jwk' });
+      if (jwk.crv !== 'P-256') throw new Error('Not P-256');
+      const publicKey = toBase64Url(Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, 'base64url'), Buffer.from(jwk.y, 'base64url')]));
+      const privateKey = await subtle.importKey('pkcs8', pkcs8, ECDH, false, ['deriveBits']);
+      return { privateKey, publicKey };
+    } catch (error) {
+      throw new DecryptionError("The project's key couldn't be read");
+    } finally {
+      pkcs8.fill(0);
+    }
+  }
+
+  /**
+   * @param {string} projectId
+   * @param {string} keyId
+   * @returns {string} The additional authenticated data of a wrapped project key
+   */
+  static aad(projectId, keyId) {
+    return `mcp:${projectId}:${keyId}`;
+  }
+
+  /**
+   * The SHA-256 of a proof, hex: what the API stores.
+   *
+   * @param {string} proof
+   * @returns {string}
+   */
+  static proofHash(proof) {
+    return createHash('sha256').update(proof).digest('hex');
+  }
+
+  _derive(info) {
+    return Buffer.from(hkdfSync('sha256', Buffer.from(this.secret, 'base64url'), Buffer.alloc(0), Buffer.from(info, 'utf8'), 32));
   }
 }
