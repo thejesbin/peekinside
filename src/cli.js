@@ -7,14 +7,22 @@
  *   npx peekinside stop       Stop it (data stays on disk)
  *   npx peekinside run        Run it in this terminal, with its log
  *   npx peekinside test       Send a test error, to check that a project is set up
+ *   npx peekinside mcp        Serve the Model Context Protocol on stdin and stdout, for AI tools:
+ *                             the local dashboard's projects, or with PEEKINSIDE_MCP_KEY a
+ *                             PeekInside Cloud project
  */
 
 import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { LOG_PREFIX, VERSION, settings } from './config.js';
+import { McpKey } from './crypto.js';
 import { HubClient } from './hub/client.js';
 import { HubProcess } from './hub/process.js';
+import { McpServer } from './mcp/server.js';
+import { CloudSource, HubSource, SourceError } from './mcp/sources.js';
+import { StdioTransport } from './mcp/stdio.js';
+import { Toolbox } from './mcp/tools.js';
 
 /**
  * Runs one command against the hub on the configured port.
@@ -44,6 +52,7 @@ export class Cli {
       stop: () => this.stop(),
       run: () => new HubProcess().run(),
       test: () => this.test(),
+      mcp: () => this.mcp(args.slice(1)),
       help: () => this.help(),
       '--help': () => this.help(),
       '-h': () => this.help(),
@@ -190,6 +199,53 @@ export class Cli {
   }
 
   /**
+   * Serves the Model Context Protocol on standard input and output, until the AI tool that started
+   * it closes them. Reads PeekInside Cloud when PEEKINSIDE_MCP_KEY is set, otherwise the local
+   * dashboard, which is started if needed. Standard output carries only protocol messages: anything
+   * else goes to standard error.
+   *
+   * Settings come from the AI tool's configuration only, never from the folder's .env files: AI
+   * tools start this in whatever repository is open, and a cloned one must not be able to send the
+   * key to another address (PEEKINSIDE_URL) or point the hub elsewhere.
+   *
+   * @param {string[]} args - `--project <id or name>`: the local project tools read when they
+   *   aren't told (default: the one of this folder)
+   * @returns {Promise<void>}
+   */
+  async mcp(args) {
+    const at = args.indexOf('--project');
+    const project = at !== -1 ? args[at + 1] || null : null;
+    const keyText = process.env.PEEKINSIDE_MCP_KEY;
+
+    let source;
+    if (keyText && keyText.trim()) {
+      const key = McpKey.parse(keyText);
+      source = key ? new CloudSource({ key, siteUrl: settings.siteUrl() }) : new UnusableSource(McpKey.problem(keyText));
+    } else {
+      source = new HubSource(this.hub, { start: () => this._startQuietly() });
+      await this._startQuietly().catch((error) => console.error(`${LOG_PREFIX} ${error.message}`));
+    }
+    if (source.cloud && source.connect) {
+      // Says early, in the AI tool's log, when the key doesn't work.
+      source.connect().catch((error) => console.error(`${LOG_PREFIX} ${error.message}`));
+    }
+
+    process.stdout.on('error', () => process.exit(0));
+    const server = new McpServer({ toolbox: new Toolbox({ source, project, cwd: process.cwd() }), version: VERSION });
+    await new StdioTransport(server).run();
+    // Writes to a pipe can still be on their way (macOS): exit once they're out.
+    process.stdout.write('', () => process.exit(0));
+  }
+
+  // Starts the hub unless it runs, without printing to standard output (the MCP channel).
+  async _startQuietly() {
+    if (await this.hub.status()) return true;
+    this.hub.spawn();
+    if (await this.hub.waitUntilReady(8000)) return true;
+    throw new Error(`The local dashboard did not start. See ${settings.dataDir()}/hub.log`);
+  }
+
+  /**
    * Prints the usage.
    *
    * @returns {void}
@@ -205,6 +261,8 @@ Usage: npx peekinside [command]
   stop      Stop it; your data stays in ${settings.dataDir()}
   run       Run it in this terminal
   test      Send a test error from this project, to check it's set up
+  mcp       Connect AI tools (Claude Code, Cursor, VS Code…) over the Model Context Protocol:
+            your local projects, or a PeekInside Cloud project with PEEKINSIDE_MCP_KEY
 
 Apps that use PeekInside start the dashboard automatically.
 Settings: PEEKINSIDE_HUB_PORT (default 7335), PEEKINSIDE_HOME (default ~/.peekinside)`);
@@ -220,6 +278,21 @@ Settings: PEEKINSIDE_HUB_PORT (default 7335), PEEKINSIDE_HOME (default ~/.peekin
     const child = spawn(cmd, args, { stdio: 'ignore', detached: true });
     child.on('error', () => console.log(`Open ${target} in your browser.`));
     child.unref();
+  }
+}
+
+/**
+ * A source that can't be read, for an MCP key that isn't one: every tool answers why, in the AI
+ * tool, where the developer sees it.
+ */
+class UnusableSource {
+  constructor(problem) {
+    this.cloud = true;
+    this.problem = problem;
+  }
+
+  connect() {
+    return Promise.reject(new SourceError(this.problem));
   }
 }
 

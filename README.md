@@ -86,11 +86,21 @@ Open it and use your app: requests show up as they happen. To check the setup be
 
 **[PeekInside Cloud](https://www.peekinside.dev/docs/cloud)** is the same dashboard for your servers and your team. Set `PEEKINSIDE_API_KEY` on a server and the same `PeekInside.attach()` sends there. What it sends is encrypted on your server and decrypted in your browser, so PeekInside Cloud only ever stores ciphertext. With Pro and up, alerts reach you by email or Slack, and heap and CPU profiles find leaks and event-loop blocks on your servers. No card is needed to start: see [pricing](https://www.peekinside.dev/#pricing).
 
+## In your AI tools
+
+`npx peekinside mcp` is an MCP server: Claude Code, Cursor, VS Code, Windsurf and other AI tools read your app's errors with their stack traces and your source lines, its requests and their queries (N+1 loops flagged), logs, jobs and memory, then fix what they find, replay the request to check, and mark the error resolved.
+
+```bash
+claude mcp add peekinside -- npx -y peekinside@latest mcp
+```
+
+It reads the local dashboard, or a PeekInside Cloud project with an MCP key from the project's settings (`PEEKINSIDE_MCP_KEY`), decrypting its records on your computer. Setup for each tool: [AI tools (MCP)](https://www.peekinside.dev/docs/mcp).
+
 ## Documentation
 
 Everything else is at **[peekinside.dev/docs](https://www.peekinside.dev/docs)**.
 
-**Docs:** [Quick start](https://www.peekinside.dev/docs/quick-start) · [Local dashboard](https://www.peekinside.dev/docs/local-dashboard) · [PeekInside Cloud](https://www.peekinside.dev/docs/cloud) · [Security](https://www.peekinside.dev/docs/security) · [Exceptions](https://www.peekinside.dev/docs/exceptions) · [Timeline and queries](https://www.peekinside.dev/docs/timeline) · [Routes](https://www.peekinside.dev/docs/routes) · [Logs](https://www.peekinside.dev/docs/logs) · [Jobs and schedules](https://www.peekinside.dev/docs/jobs) · [Dumps](https://www.peekinside.dev/docs/dumps) · [Runtime](https://www.peekinside.dev/docs/runtime) · [Alerts](https://www.peekinside.dev/docs/alerts) · [Configuration](https://www.peekinside.dev/docs/configuration) · [API](https://www.peekinside.dev/docs/api)
+**Docs:** [Quick start](https://www.peekinside.dev/docs/quick-start) · [Local dashboard](https://www.peekinside.dev/docs/local-dashboard) · [PeekInside Cloud](https://www.peekinside.dev/docs/cloud) · [Security](https://www.peekinside.dev/docs/security) · [Exceptions](https://www.peekinside.dev/docs/exceptions) · [Timeline and queries](https://www.peekinside.dev/docs/timeline) · [Routes](https://www.peekinside.dev/docs/routes) · [Logs](https://www.peekinside.dev/docs/logs) · [Jobs and schedules](https://www.peekinside.dev/docs/jobs) · [Dumps](https://www.peekinside.dev/docs/dumps) · [Runtime](https://www.peekinside.dev/docs/runtime) · [Alerts](https://www.peekinside.dev/docs/alerts) · [AI tools (MCP)](https://www.peekinside.dev/docs/mcp) · [Configuration](https://www.peekinside.dev/docs/configuration) · [API](https://www.peekinside.dev/docs/api)
 
 **Guides:** [Laravel Telescope for Node.js](https://www.peekinside.dev/guides/laravel-telescope-for-nodejs) · [Node.js debugging tools](https://www.peekinside.dev/guides/nodejs-debugging-tools) · [Finding N+1 queries in Node.js](https://www.peekinside.dev/guides/nodejs-n-plus-one-queries)
 
