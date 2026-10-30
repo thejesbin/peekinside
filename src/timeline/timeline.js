@@ -19,6 +19,7 @@ import { createHash } from 'crypto';
 import { performance } from 'perf_hooks';
 import { RequestContext } from '../exceptions/request-context.js';
 import { Operation } from '../instrumentation/operation.js';
+import { CpuProfiler } from '../runtime/cpu-profiler.js';
 import { LoopMonitor } from '../runtime/loop-monitor.js';
 import { Caller } from './caller.js';
 import { ExecutionHash } from './execution-hash.js';
@@ -37,7 +38,9 @@ export const TIMELINE_DEFAULTS = Object.freeze({
 });
 
 // Spans listed per request, by type.
-const SPAN_CAPS = Object.freeze({ query: 500, http: 100, log: 200, measure: 100, exception: 10, block: 20, dump: 50 });
+const SPAN_CAPS = Object.freeze({ query: 500, http: 100, log: 200, measure: 100, exception: 10, block: 20, dump: 50, mail: 20 });
+// Functions a block span names (see CpuProfiler).
+const BLOCK_SITES = 3;
 const MAX_STATEMENTS = 200;
 // Executions per statement whose parameters are kept.
 const PARAMS_PER_STATEMENT = 20;
@@ -72,11 +75,19 @@ export class TimelineSettings {
     this.nPlusOneThreshold = Number.isInteger(options.nPlusOneThreshold) && options.nPlusOneThreshold >= 2
       ? options.nPlusOneThreshold
       : TIMELINE_DEFAULTS.nPlusOneThreshold;
-    // 0 turns block detection off (loopBlockMs: false).
-    this.loopBlockMs = options.loopBlockMs === false || options.loopBlockMs === 0
-      ? 0
-      : Number.isFinite(options.loopBlockMs) && options.loopBlockMs >= 50 ? options.loopBlockMs : TIMELINE_DEFAULTS.loopBlockMs;
+    this.loopBlockMs = TimelineSettings.loopBlockMs(options);
     this.caller = new Caller(root);
+  }
+
+  /**
+   * The shortest block recorded: at least 50 ms, 0 when detection is off (loopBlockMs: false).
+   *
+   * @param {Object} options - PeekInside options
+   * @returns {number}
+   */
+  static loopBlockMs(options) {
+    if (options.loopBlockMs === false || options.loopBlockMs === 0) return 0;
+    return Number.isFinite(options.loopBlockMs) && options.loopBlockMs >= 50 ? options.loopBlockMs : TIMELINE_DEFAULTS.loopBlockMs;
   }
 }
 
@@ -121,7 +132,7 @@ export class Timeline {
     this.origin = origin;
     this.closed = false;
     this.spans = [];
-    this.listed = { query: 0, http: 0, log: 0, measure: 0, exception: 0, block: 0, dump: 0 };
+    this.listed = { query: 0, http: 0, log: 0, measure: 0, exception: 0, block: 0, dump: 0, mail: 0 };
     this.dropped = 0;
     this.statements = [];
     this.byFingerprint = new Map();
@@ -304,6 +315,31 @@ export class Timeline {
   }
 
   /**
+   * Starts the span of an email the request sends (local dashboard only): from the sendMail() call
+   * to the transport's answer. The Mail page has the message.
+   *
+   * @param {{ id: string, subject: string, to: string[] }} mail
+   * @returns {SpanHandle|null} null once the request's timeline is closed
+   */
+  mail(mail) {
+    if (this.closed) return null;
+    try {
+      const startedAt = performance.now();
+      let span = null;
+      if (this.listed.mail < SPAN_CAPS.mail) {
+        this.listed.mail++;
+        span = { type: 'mail', start: this._offset(startedAt), duration: null, id: mail.id, subject: cut(mail.subject, MAX_LOG), to: mail.to.slice(0, 3) };
+        this.spans.push(span);
+      } else {
+        this.dropped++;
+      }
+      return new SpanHandle(this, 'mail', span, startedAt, null);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
    * Records an exception recorded during the request.
    *
    * @param {{ id: string, summary: { name: string, message: string } }} record - An ExceptionRecord
@@ -331,8 +367,9 @@ export class Timeline {
 
   /**
    * Records that the event loop was blocked while the request was in flight (see LoopMonitor):
-   * the request waited, whichever code blocked it. Blocks shorter than the settings' loopBlockMs
-   * are left out.
+   * the request waited, whichever code blocked it. With the CPU profiler running, the span names
+   * the functions that ran meanwhile, this request's or another's. Blocks shorter than the
+   * settings' loopBlockMs are left out.
    *
    * @param {number} start - performance.now() when the block began
    * @param {number} duration - ms
@@ -347,7 +384,10 @@ export class Timeline {
     if (length > this.stats.loopBlock) this.stats.loopBlock = length;
     if (this.listed.block < SPAN_CAPS.block) {
       this.listed.block++;
-      this.spans.push({ type: 'block', start: this._offset(from), duration: round(length) });
+      const span = { type: 'block', start: this._offset(from), duration: round(length) };
+      const blamed = CpuProfiler.blame(start, duration);
+      if (blamed && blamed.sites.length) span.sites = blamed.sites.slice(0, BLOCK_SITES);
+      this.spans.push(span);
     } else {
       this.dropped++;
     }

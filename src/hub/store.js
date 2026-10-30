@@ -17,6 +17,8 @@ export const DEFAULT_MAX_EXCEPTIONS = 500;
 export const DEFAULT_MAX_JOBS = 2000;
 export const DEFAULT_MAX_LOGS = 10000;
 export const DEFAULT_MAX_DUMPS = 1000;
+// An email's detail holds its HTML (up to 256 KB): fewer are kept.
+export const DEFAULT_MAX_MAILS = 500;
 
 /**
  * All projects on this machine.
@@ -249,6 +251,47 @@ export class Store {
   }
 
   /**
+   * Stores new emails of a project.
+   *
+   * @param {string} projectId
+   * @param {Object[]} records
+   * @returns {Object[]}
+   */
+  appendMails(projectId, records) {
+    const project = this.projects.get(projectId);
+    return project && records.length ? project.appendMails(records) : [];
+  }
+
+  /**
+   * @param {string} projectId
+   * @param {{ after?: number, before?: number, limit: number }} query
+   * @returns {{ mails: Object[], hasMore: boolean }|null}
+   */
+  listMails(projectId, query) {
+    const project = this.projects.get(projectId);
+    return project ? project.listMails(query) : null;
+  }
+
+  /**
+   * @param {string} projectId
+   * @param {string} mailId
+   * @returns {Object|null}
+   */
+  mailDetail(projectId, mailId) {
+    const project = this.projects.get(projectId);
+    return project ? project.mailDetail(mailId) : null;
+  }
+
+  /**
+   * @param {string} projectId
+   * @returns {void}
+   */
+  clearMails(projectId) {
+    const project = this.projects.get(projectId);
+    if (project) project.clearMails();
+  }
+
+  /**
    * Adds process samples of a project's process (kept in memory, for the Runtime page).
    *
    * @param {string} projectId
@@ -263,7 +306,35 @@ export class Store {
   }
 
   /**
-   * A project's recent processes with their samples.
+   * Adds heap profiles of a project's process (kept in memory, for the Runtime page).
+   *
+   * @param {string} projectId
+   * @param {Object} instance - Validated process details
+   * @param {Object[]} windows - Validated profiles
+   * @param {number} [now=Date.now()]
+   * @returns {void}
+   */
+  addHeapWindows(projectId, instance, windows, now = Date.now()) {
+    const project = this.projects.get(projectId);
+    if (project) project.addHeapWindows(instance, windows, now);
+  }
+
+  /**
+   * Adds windows of event-loop blocks of a project's process (kept in memory, for the Runtime page).
+   *
+   * @param {string} projectId
+   * @param {Object} instance - Validated process details
+   * @param {Object[]} windows - Validated windows
+   * @param {number} [now=Date.now()]
+   * @returns {void}
+   */
+  addBlockWindows(projectId, instance, windows, now = Date.now()) {
+    const project = this.projects.get(projectId);
+    if (project) project.addBlockWindows(instance, windows, now);
+  }
+
+  /**
+   * A project's recent processes with their samples, heap profiles and block windows.
    *
    * @param {string} projectId
    * @param {number} [now=Date.now()]
@@ -308,6 +379,25 @@ export class Store {
   detail(projectId, requestId) {
     const project = this.projects.get(projectId);
     return project ? project.detail(requestId) : null;
+  }
+
+  /**
+   * What replaying a request takes (see replay.js): the request as stored, and the project's
+   * running processes, which say where the app listens.
+   *
+   * @param {string} projectId
+   * @param {string} requestId
+   * @param {number} [now]
+   * @returns {{ name: string, summary: Object, detail: Object, instances: Object[] } | null} null
+   *   when the project or the request is no longer stored
+   */
+  replaySource(projectId, requestId, now = Date.now()) {
+    const project = this.projects.get(projectId);
+    const summary = project ? project.summary(requestId) : null;
+    const detail = summary ? project.detail(requestId) : null;
+    if (!summary || !detail) return null;
+    const { name, instances } = project.describe(now);
+    return { name, summary, detail, instances };
   }
 
   /**
@@ -441,7 +531,8 @@ export class Store {
       exceptionSegmentSize: this.exceptionSegmentSize,
       maxJobs: DEFAULT_MAX_JOBS,
       maxLogs: DEFAULT_MAX_LOGS,
-      maxDumps: DEFAULT_MAX_DUMPS
+      maxDumps: DEFAULT_MAX_DUMPS,
+      maxMails: DEFAULT_MAX_MAILS
     };
   }
 }

@@ -5,13 +5,16 @@
  * Environment variables are read each time a setting is used, never cached, so a process (or a
  * test) can change them at runtime.
  *
- *   PEEKINSIDE_URL           Base URL of the PeekInside site: cloud ingest and the dashboard interface
- *                            (default https://peekinside.dev). Change it when developing the dashboard.
+ *   PEEKINSIDE_URL           Base URL of the PeekInside site: the dashboard interface and links to it
+ *                            (default https://www.peekinside.dev). Change it when developing the dashboard.
+ *   PEEKINSIDE_API_URL       Base URL of PeekInside Cloud's API: ingest and the MCP server's reads
+ *                            (default https://api.peekinside.dev; with only PEEKINSIDE_URL set, that site)
  *   PEEKINSIDE_HOME          Folder for local data (default ~/.peekinside)
  *   PEEKINSIDE_HUB_PORT      Port of the local dashboard (default 7335)
  *   PEEKINSIDE_MAX_REQUESTS  Requests the local dashboard keeps per project (default 1000)
  *   PEEKINSIDE_MAX_EXCEPTIONS  Exceptions the local dashboard keeps per project (default 500)
  *   PEEKINSIDE_API_KEY       PeekInside Cloud API key; turns on cloud mode
+ *   PEEKINSIDE_MCP_KEY       MCP key: `npx peekinside mcp` reads that PeekInside Cloud project (cli.js)
  *   PEEKINSIDE_ENV           Environment label (falls back to NODE_ENV)
  *   PEEKINSIDE_PROJECT       Project name in the local dashboard
  *   PEEKINSIDE_LOCAL         1 or 0 to force the local dashboard on or off
@@ -24,7 +27,10 @@ import { fileURLToPath } from 'url';
 
 export const PRODUCT_NAME = 'PeekInside';
 export const LOG_PREFIX = '[peekinside]';
-export const DEFAULT_SITE_URL = 'https://peekinside.dev';
+// www: the bare domain redirects there, and module imports fail on its redirect (no CORS header).
+export const DEFAULT_SITE_URL = 'https://www.peekinside.dev';
+// Cloud's API, reached directly rather than through the site, whose host counts every request it forwards.
+export const DEFAULT_API_URL = 'https://api.peekinside.dev';
 // "PEEK" on a phone keypad
 export const DEFAULT_HUB_PORT = 7335;
 // Bumped only for breaking changes to the hub's HTTP API; the dashboard interface is versioned with it.
@@ -60,22 +66,37 @@ export class Settings {
   }
 
   /**
-   * Origin of the PeekInside site, which hosts cloud ingest and the dashboard interface.
-   * An invalid PEEKINSIDE_URL is reported and ignored, so a typo can't send data elsewhere.
+   * Origin of the PeekInside site: the dashboard interface, and links to PeekInside Cloud.
    *
-   * @returns {string} Origin such as "https://peekinside.dev"
+   * @returns {string} Origin such as "https://www.peekinside.dev"
    */
   siteUrl() {
-    const value = this.env.PEEKINSIDE_URL;
-    if (!value) return DEFAULT_SITE_URL;
+    return this._origin('PEEKINSIDE_URL', DEFAULT_SITE_URL);
+  }
+
+  /**
+   * Origin of PeekInside Cloud's API: ingest, alert rules and the MCP server's reads. With only
+   * PEEKINSIDE_URL set (developing the dashboard), that site, which forwards /api/* to the API.
+   *
+   * @returns {string} Origin such as "https://api.peekinside.dev"
+   */
+  apiUrl() {
+    return this._origin(this.env.PEEKINSIDE_API_URL ? 'PEEKINSIDE_API_URL' : 'PEEKINSIDE_URL', DEFAULT_API_URL);
+  }
+
+  // The origin an environment variable gives, else the default. An invalid value is reported and
+  // ignored, so a typo can't send data elsewhere.
+  _origin(name, fallback) {
+    const value = this.env[name];
+    if (!value) return fallback;
     try {
       const url = new URL(value);
       if (url.protocol === 'https:' || url.protocol === 'http:') return url.origin;
     } catch (error) {
       // Fall through to the default.
     }
-    console.warn(`${LOG_PREFIX} Ignoring PEEKINSIDE_URL: "${value}" is not an http(s) URL`);
-    return DEFAULT_SITE_URL;
+    console.warn(`${LOG_PREFIX} Ignoring ${name}: "${value}" is not an http(s) URL`);
+    return fallback;
   }
 
   /**

@@ -30,8 +30,9 @@ const kContext = Symbol('peekInside.context');
 // What a route pattern and a handler name may take up.
 const MAX_ROUTE = 512;
 const MAX_HANDLER = 256;
-// Dumps listed in a request's record (the Dumps page has them all).
+// Dumps and emails listed in a request's record (the Dumps and Mail pages have them all).
 const MAX_DUMP_LINKS = 20;
+const MAX_MAIL_LINKS = 20;
 // The request an exception last escaped from, until the current job ends.
 let escaped = null;
 
@@ -143,6 +144,11 @@ export class RequestContext {
      * @type {{ id: string, label: string|null, type: string, preview: string }[]}
      */
     this.dumps = [];
+    /**
+     * Emails sent during the request (nodemailer), for its record
+     * @type {{ id: string, subject: string, to: string[] }[]}
+     */
+    this.mails = [];
 
     this._req = req;
     // Route parameters an integration noted (or a function returning them), for frameworks that
@@ -255,9 +261,21 @@ export class RequestContext {
   }
 
   /**
+   * Counts an email the request starts sending: listed on its record right away (it may finish after
+   * the response), and placed on its timeline until the transport answers.
+   *
+   * @param {{ id: string, subject: string, to: string[] }} link - What the record lists
+   * @returns {import('../timeline/timeline.js').SpanHandle|null} The span to end once it's sent
+   */
+  noteMail(link) {
+    if (this.mails.length < MAX_MAIL_LINKS) this.mails.push(link);
+    return this.timeline ? this.timeline.mail(link) : null;
+  }
+
+  /**
    * Adds what the request's record shows of the request beyond the exchange itself: who it was for,
-   * its route and handler, the dumps made during it, and route parameters the Node.js request
-   * didn't carry.
+   * its route and handler, the dumps made and emails sent during it, and route parameters the
+   * Node.js request didn't carry.
    *
    * @param {import('../capture/exchange-recorder.js').Exchange} exchange - Changed in place
    * @returns {void}
@@ -267,6 +285,7 @@ export class RequestContext {
     if (this.route) exchange.route = this.route;
     if (this.handler) exchange.handler = this.handler;
     if (this.dumps.length) exchange.dumps = this.dumps.slice();
+    if (this.mails.length) exchange.mails = this.mails.slice();
     if (this._params !== undefined && (!exchange.params || !Object.keys(exchange.params).length)) {
       const params = this.routeParams();
       if (params) exchange.params = params;

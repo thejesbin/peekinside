@@ -11,9 +11,9 @@
  * pass them to PeekInside#instrument().
  *
  * Outgoing HTTP and console capture are process-wide subscriptions; they record only for code
- * running inside a request (log lines go to the Logs page from anywhere). Loggers (pino, winston)
- * and job libraries (node-cron, cron, BullMQ) are found and patched like the drivers; NestJS's
- * Logger and @nestjs/schedule are reached through the app instead (see integrations/nest.js).
+ * running inside a request (log lines go to the Logs page from anywhere). Loggers (pino, winston),
+ * job libraries (node-cron, cron, BullMQ) and nodemailer are found and patched like the drivers;
+ * NestJS's Logger and @nestjs/schedule are reached through the app instead (see integrations/nest.js).
  */
 
 import { createRequire } from 'module';
@@ -26,6 +26,7 @@ import { JobInstrumentation } from './jobs.js';
 import { LoggerInstrumentation } from './loggers.js';
 import { MongoInstrumentation } from './mongodb.js';
 import { Mysql2Instrumentation } from './mysql2.js';
+import { MailInstrumentation } from './nodemailer.js';
 import { PgInstrumentation } from './pg.js';
 import { PrismaInstrumentation } from './prisma.js';
 
@@ -33,6 +34,7 @@ const requireHere = createRequire(import.meta.url);
 const scanned = new Set();
 const scannedLoggers = new Set();
 const scannedJobs = new Set();
+const scannedMail = new Set();
 
 /**
  * Installs instrumentations.
@@ -47,18 +49,38 @@ export class Instrumentation {
    * @param {boolean} options.outgoing - node:http/https and fetch
    * @param {boolean} options.logs - The console, pino and winston
    * @param {boolean} [options.jobs=false] - node-cron, cron and BullMQ
+   * @param {boolean} [options.mail=false] - nodemailer (the local dashboard's Mail page)
    * @returns {void}
    */
-  static install({ root, queries, outgoing, logs, jobs = false }) {
+  static install({ root, queries, outgoing, logs, jobs = false, mail = false }) {
     try {
       if (outgoing) HttpInstrumentation.install();
       if (logs) ConsoleInstrumentation.install();
       if (queries) Instrumentation.patchInstalled(root);
       if (logs) Instrumentation.patchLoggers(root);
       if (jobs) Instrumentation.patchJobs(root);
+      if (mail) Instrumentation.patchMail(root);
     } catch (error) {
       // Monitoring must never break the host application.
     }
+  }
+
+  /**
+   * Patches nodemailer installed in a project, once per project folder: its CommonJS build, and
+   * its ES module build when it has one (nodemailer 10), as soon as that is imported.
+   *
+   * @param {string} root
+   * @returns {boolean} Whether the CommonJS build was patched
+   */
+  static patchMail(root) {
+    const fromRoot = projectRequire(root, scannedMail);
+    const main = fromRoot ? resolve(fromRoot, 'nodemailer') : null;
+    if (!main) return false;
+    const patched = patchWith(fromRoot, 'nodemailer/lib/mailer', MailInstrumentation.mailer);
+    const directory = packageDirectory(main, 'nodemailer');
+    const esm = directory && path.join(directory, 'dist', 'esm', 'mailer', 'index.js');
+    if (esm && fs.existsSync(esm)) void import(pathToFileURL(esm).href).then(MailInstrumentation.mailer, () => false);
+    return patched;
   }
 
   /**
@@ -157,6 +179,7 @@ function patchModule(value) {
   if (!value || (typeof value !== 'object' && typeof value !== 'function')) return false;
   if (LoggerInstrumentation.pino(value) || LoggerInstrumentation.winston(value)) return true;
   if (JobInstrumentation.nodeCron(value) || JobInstrumentation.cron(value) || JobInstrumentation.bullmq(value)) return true;
+  if (MailInstrumentation.main(value)) return true;
   if (PgInstrumentation.patch(value)) return true;
   if (Mysql2Instrumentation.patch(value)) return true;
   if (PrismaInstrumentation.patch(value)) return true;

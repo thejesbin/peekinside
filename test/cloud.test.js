@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { webcrypto } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import express from 'express';
 import PeekInside from '../index.js';
 import { Sealer, SyncSealer } from '../src/crypto.js';
@@ -41,9 +42,15 @@ process.env.PEEKINSIDE_HUB_PORT = String(await new Promise((resolve) => {
   });
 }));
 
-// The fake PeekInside Cloud: records every batch it is sent, or answers 503 while `down`.
+// The fake PeekInside Cloud: records every batch it is sent, or answers 503 while `down`. Like
+// PeekInside Cloud, it checks the plan before the batch: while `paused` it answers 402 (keeping
+// what it was sent in `refused`), and it refuses a batch with nothing in it.
 const batches = [];
+const refused = [];
 let down = false;
+let paused = false;
+let answer = { accepted: true };
+const LISTS = ['events', 'exceptions', 'jobs', 'logs', 'samples', 'heapWindows', 'blockWindows'];
 const ingest = http.createServer((req, res) => {
   let body = '';
   req.setEncoding('utf8');
@@ -53,9 +60,19 @@ const ingest = http.createServer((req, res) => {
       res.writeHead(503, { 'content-type': 'application/json' });
       return res.end('{"error":"down"}');
     }
-    batches.push({ headers: req.headers, body: JSON.parse(body), bytes: Buffer.byteLength(body) });
+    const parsed = JSON.parse(body);
+    if (paused) {
+      refused.push(parsed);
+      res.writeHead(402, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'PeekInside Cloud is paused for this project\'s organization. Choose a plan to keep sending data.' }));
+    }
+    if (!LISTS.some((list) => Array.isArray(parsed[list]) && parsed[list].length)) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      return res.end('{"error":"Send at least one event, exception, job run, log line or sample"}');
+    }
+    batches.push({ headers: req.headers, body: parsed, bytes: Buffer.byteLength(body) });
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{"accepted":true}');
+    res.end(JSON.stringify(answer));
   });
 });
 let ingestUrl;
@@ -121,6 +138,14 @@ async function openException(sealed) {
 
 async function openEvent(sealed) {
   return { ...sealed, summary: await open(sealed.summary, `summary:${sealed.id}`), detail: await open(sealed.detail, `detail:${sealed.id}`) };
+}
+
+// A block in the app's own code.
+function reconcileLedger(ms) {
+  const end = performance.now() + ms;
+  let total = 0;
+  while (performance.now() < end) total += Math.sqrt(total + 5);
+  return total;
 }
 
 async function waitFor(check, what) {
@@ -245,6 +270,132 @@ test('cloud mode seals exceptions into the same batches as requests', async () =
     assert.deepEqual(request.detail.timeline.spans.map((span) => span.type), ['log', 'exception']);
     assert.equal(request.detail.timeline.spans[0].message, 'about to fail');
   } finally {
+    peekInside.stop();
+    server.close();
+  }
+});
+
+test('heap and CPU profiles run once PeekInside Cloud says the plan includes them, and go out sealed', async () => {
+  batches.length = 0;
+  answer = { accepted: true, features: { heapProfiling: true, cpuProfiling: true } };
+  const app = express();
+  app.set('env', 'test');
+  const log = console.log;
+  console.log = () => {};
+  const peekInside = PeekInside.attach(app, { apiKey: API_KEY, local: false });
+  console.log = log;
+  try {
+    assert.equal(peekInside._heap.running, false, 'off until PeekInside Cloud answers');
+    assert.equal(peekInside._blocks.running, true, 'the CPU profiler starts with the app (V8 only places code compiled after it starts)');
+    peekInside._sampler.take();
+    await waitFor(() => {
+      void peekInside.flush();
+      return peekInside._heap.running;
+    }, 'the profiler to start');
+
+    // Something held since sampling started (4 MB), for the profile to show.
+    const held = [];
+    for (let i = 0; i < 2000; i++) held.push(new Array(256).fill(i));
+    const window = peekInside._heap.take();
+    assert.ok(window.sites.length && held.length);
+    const batch = await waitFor(() => {
+      void peekInside.flush();
+      return batches.find((item) => item.body.heapWindows);
+    }, 'a batch with a heap profile');
+    const [sealed] = batch.body.heapWindows;
+    assert.deepEqual(Object.keys(sealed), ['id', 'at', 'reason', 'total', 'sites']);
+    assert.deepEqual([sealed.at, sealed.reason, sealed.total], [window.at, 'interval', window.total], 'when and how much stay readable');
+    assert.match(sealed.sites, /^v1\./);
+    const raw = JSON.stringify(batch.body);
+    for (const site of window.sites) {
+      if (site.file) assert.ok(!raw.includes(site.file), 'code locations are sealed');
+    }
+    assert.deepEqual(await open(sealed.sites, `heap:${sealed.id}`), window.sites);
+    await assert.rejects(open(sealed.sites, 'heap:another'), 'bound to its window');
+    assert.equal(batch.body.instance.id, peekInside._cloud.instance.id, 'the process it came from');
+
+    // A block, and the window that names what ran.
+    reconcileLedger(220);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const blocks = peekInside._blocks.flush(true);
+    assert.equal(blocks.sites[0].function, 'reconcileLedger', JSON.stringify(blocks.sites));
+    const blockBatch = await waitFor(() => {
+      void peekInside.flush();
+      return batches.find((item) => item.body.blockWindows);
+    }, 'a batch with a block window');
+    const [sealedBlocks] = blockBatch.body.blockWindows;
+    assert.deepEqual(Object.keys(sealedBlocks), ['id', 'at', 'count', 'total', 'worst', 'sites']);
+    assert.deepEqual([sealedBlocks.at, sealedBlocks.count, sealedBlocks.total, sealedBlocks.worst], [blocks.at, blocks.count, blocks.total, blocks.worst], 'when, how many and how long stay readable');
+    assert.ok(!JSON.stringify(blockBatch.body).includes('reconcileLedger'), 'the functions are sealed');
+    assert.deepEqual(await open(sealedBlocks.sites, `blocks:${sealedBlocks.id}`), blocks.sites);
+
+    // The plan changed: profiling stops.
+    answer = { accepted: true, features: { heapProfiling: false, cpuProfiling: false } };
+    peekInside._sampler.take();
+    await waitFor(() => {
+      void peekInside.flush();
+      return !peekInside._heap.running && !peekInside._blocks.running;
+    }, 'the profilers to stop');
+  } finally {
+    answer = { accepted: true };
+    peekInside.stop();
+  }
+});
+
+test('while PeekInside Cloud is paused for the organization, nothing is recorded; sending resumes on its own once it has a plan', async () => {
+  batches.length = 0;
+  refused.length = 0;
+  paused = true;
+  answer = { accepted: true, features: { heapProfiling: false, cpuProfiling: true } };
+  const app = express();
+  app.set('env', 'test');
+  const { log, error } = console;
+  const lines = [];
+  console.log = (line) => lines.push(String(line));
+  console.error = (line) => lines.push(String(line));
+  const peekInside = PeekInside.attach(app, { apiKey: API_KEY, local: false });
+  const transport = peekInside._cloud;
+  transport.pauseCheckMs = 100;
+  app.get('/orders/:id', (req, res) => res.json({ id: req.params.id }));
+  const server = app.listen(0, '127.0.0.1');
+  const get = (url) => new Promise((resolve) => http.get({ host: '127.0.0.1', port: server.address().port, path: url }, (res) => res.resume().on('end', resolve)));
+  const probes = () => refused.filter((body) => JSON.stringify(body) === '{"events":[]}').length;
+  try {
+    await new Promise((resolve) => server.once('listening', resolve));
+    assert.equal(peekInside._blocks.running, true);
+    await get('/orders/1');
+    await waitFor(() => {
+      void peekInside.flush();
+      return transport.paused;
+    }, 'the pause');
+    assert.equal(transport.disabled, true, 'nothing is recorded meanwhile');
+    assert.equal(peekInside._blocks.running, false, 'and the profilers stop');
+    await get('/orders/2');
+    assert.equal(transport.queue.length, 0);
+
+    // PeekInside Cloud is asked again, with no data, until the organization has a plan.
+    await waitFor(() => probes() >= 2, 'checks while paused');
+    assert.equal(transport.disabled, true);
+    assert.equal(batches.length, 0);
+    assert.equal(lines.filter((line) => line.includes('is paused')).length, 1, 'the pause is logged once');
+
+    paused = false;
+    await waitFor(() => !transport.disabled, 'recording to resume');
+    await get('/orders/3');
+    const batch = await waitFor(() => {
+      void peekInside.flush();
+      return batches.find((item) => item.body.events.length);
+    }, 'a batch after the pause');
+    const urls = await Promise.all(batch.body.events.map(async (event) => (await openEvent(event)).summary.url));
+    assert.deepEqual(urls, ['/orders/3'], 'what happened while paused is not sent');
+    assert.equal(transport.paused, false);
+    assert.equal(lines.filter((line) => line.includes('sending resumed')).length, 1);
+    assert.equal(peekInside._blocks.running, true, 'the plan\'s profilers start again');
+  } finally {
+    paused = false;
+    answer = { accepted: true };
+    console.log = log;
+    console.error = error;
     peekInside.stop();
     server.close();
   }
