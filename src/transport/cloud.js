@@ -80,7 +80,7 @@ process.stdin.on('end', () => {
 `;
 
 /**
- * Seals records to the project's public key and posts them to `<site>/api/ingest`.
+ * Seals records to the project's public key and posts them to `<api>/api/ingest` (Settings#apiUrl).
  */
 export class CloudTransport extends BatchTransport {
   /**
@@ -106,7 +106,7 @@ export class CloudTransport extends BatchTransport {
     });
 
     this.apiKey = key;
-    this.endpoint = `${settings.siteUrl()}/api/ingest`;
+    this.endpoint = `${settings.apiUrl()}/api/ingest`;
     this.userAgent = `peekinside-node/${version || 'dev'}`;
     /**
      * This process, as its samples are grouped: a random id, its pid and Node.js version (no host

@@ -220,7 +220,7 @@ export class Cli {
     let source;
     if (keyText && keyText.trim()) {
       const key = McpKey.parse(keyText);
-      source = key ? new CloudSource({ key, siteUrl: settings.siteUrl() }) : new UnusableSource(McpKey.problem(keyText));
+      source = key ? new CloudSource({ key, siteUrl: settings.siteUrl(), apiUrl: settings.apiUrl() }) : new UnusableSource(McpKey.problem(keyText));
     } else {
       source = new HubSource(this.hub, { start: () => this._startQuietly() });
       await this._startQuietly().catch((error) => console.error(`${LOG_PREFIX} ${error.message}`));
