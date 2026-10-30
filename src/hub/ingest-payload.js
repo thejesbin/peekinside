@@ -13,10 +13,11 @@ import { PROJECT_ID } from './store.js';
 export const MAX_BATCH = 1000;
 // Exceptions per batch.
 export const MAX_EXCEPTIONS_BATCH = 500;
-// Job runs, log lines and dumps per batch.
+// Job runs, log lines, dumps and emails per batch.
 export const MAX_JOBS_BATCH = 1000;
 export const MAX_LOGS_BATCH = 2000;
 export const MAX_DUMPS_BATCH = 1000;
+export const MAX_MAILS_BATCH = 500;
 // Request ids are UUIDs in practice. They appear in URLs and index files, so only safe
 // characters are accepted.
 export const REQUEST_ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -60,6 +61,14 @@ const SAMPLE_EXTRAS = [
   ['requests', 1e9],
   ['inFlight', 1e7]
 ];
+// Heap profiles per batch (the SDK reads one a minute and keeps 12 while the hub is down), and the
+// code locations each may name.
+const MAX_HEAP_WINDOWS = 12;
+const MAX_HEAP_SITES = 100;
+const SITE_ID = /^[0-9a-f]{12}$/;
+// Windows of event-loop blocks per batch (one a minute at most), and the functions each may name.
+const MAX_BLOCK_WINDOWS = 12;
+const MAX_BLOCK_SITES = 50;
 
 /**
  * A validated ingest batch: `{ project, instance, requests, exceptions, samples, blocked }`.
@@ -86,13 +95,14 @@ export class IngestPayload {
     const jobs = body.jobs != null ? body.jobs : [];
     const logs = body.logs != null ? body.logs : [];
     const dumps = body.dumps != null ? body.dumps : [];
+    const mails = body.mails != null ? body.mails : [];
     if (!Array.isArray(jobs) || jobs.length > MAX_JOBS_BATCH || !Array.isArray(logs) || logs.length > MAX_LOGS_BATCH) {
       return null;
     }
-    if (!Array.isArray(dumps) || dumps.length > MAX_DUMPS_BATCH) {
+    if (!Array.isArray(dumps) || dumps.length > MAX_DUMPS_BATCH || !Array.isArray(mails) || mails.length > MAX_MAILS_BATCH) {
       return null;
     }
-    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, samples: body.samples, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
+    return new IngestPayload({ project, instance, requests, exceptions, jobs, logs, dumps, mails, samples: body.samples, heapWindows: body.heapWindows, blockWindows: body.blockWindows, blocked: body.blocked, hasExceptions: Array.isArray(body.exceptions) });
   }
 
   /**
@@ -106,12 +116,15 @@ export class IngestPayload {
    * @param {Array} [parts.jobs] - Job runs as sent
    * @param {Array} [parts.logs] - Log lines as sent
    * @param {Array} [parts.dumps] - Dumps as sent
+   * @param {Array} [parts.mails] - Emails as sent
    * @param {*} [parts.samples] - Process samples (memory, CPU, event-loop delay), as sent
+   * @param {*} [parts.heapWindows] - Where the heap was held (code locations and bytes), as sent
+   * @param {*} [parts.blockWindows] - Event-loop blocks and the code that ran during them, as sent
    * @param {*} parts.blocked - Counts of unrecorded server requests, as sent
    * @param {boolean} [parts.hasExceptions=false] - Whether the batch had an exception list (SDKs
    *   from before exceptions don't send one)
    */
-  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], samples, blocked, hasExceptions = false }) {
+  constructor({ project, instance, requests, exceptions = [], jobs = [], logs = [], dumps = [], mails = [], samples, heapWindows, blockWindows, blocked, hasExceptions = false }) {
     this.project = project;
     this.instance = instance;
     /**
@@ -145,6 +158,16 @@ export class IngestPayload {
      */
     this.samples = readSamples(samples);
     /**
+     * The valid heap profiles, oldest first: each the code locations holding the most memory
+     * @type {{ at: number, reason: 'interval'|'pressure', total: number, sites: Object[] }[]}
+     */
+    this.heapWindows = readHeapWindows(heapWindows);
+    /**
+     * The valid windows of event-loop blocks, oldest first: how many, how long, and the code that ran
+     * @type {{ at: number, count: number, total: number, worst: number, sites: Object[] }[]}
+     */
+    this.blockWindows = readBlockWindows(blockWindows);
+    /**
      * The valid job runs and log lines, flattened into what the store keeps
      * @type {Object[]}
      */
@@ -158,6 +181,12 @@ export class IngestPayload {
      */
     this.dumps = dumps.map(readDump).filter(Boolean);
     this.rejectedDumps = dumps.length - this.dumps.length;
+    /**
+     * The valid emails, flattened into what the store keeps (the message is the detail)
+     * @type {Object[]}
+     */
+    this.mails = mails.map(readMail).filter(Boolean);
+    this.rejectedMails = mails.length - this.mails.length;
     /**
      * The valid counts of server requests the SDK didn't record
      * @type {{ kind: 'host'|'client', value: string, count: number }[]}
@@ -218,6 +247,7 @@ function readRecord(value) {
     route: text(summary.route, MAX_ROUTE) || null,
     handler: text(summary.handler, MAX_HANDLER) || null,
     user: readUser(summary.user),
+    replayOf: typeof summary.replayOf === 'string' && REQUEST_ID.test(summary.replayOf) ? summary.replayOf : null,
     detail
   };
 }
@@ -345,6 +375,37 @@ function readDump(value) {
   };
 }
 
+// An email: who from and to, its subject and how it went, for the list; the message as its detail.
+// The message is the dashboard's to read, and the preview's: the hub only keeps it.
+function readMail(value) {
+  if (!value || typeof value !== 'object') return null;
+  if (typeof value.id !== 'string' || !REQUEST_ID.test(value.id) || !Number.isFinite(value.occurredAt)) return null;
+  if (!optionalId(value.requestId) || !optionalId(value.jobRunId)) return null;
+  const summary = value.summary && typeof value.summary === 'object' ? value.summary : {};
+  const detail = value.detail && typeof value.detail === 'object' && !Array.isArray(value.detail) ? value.detail : {};
+  const error = summary.error && typeof summary.error === 'object' ? summary.error : null;
+  return {
+    id: value.id,
+    occurredAt: value.occurredAt,
+    environment: text(value.environment, 32) || 'development',
+    release: release(value.release),
+    requestId: value.requestId || null,
+    jobRunId: value.jobRunId || null,
+    location: readCaller(value.location),
+    subject: text(summary.subject, 1000),
+    from: text(summary.from, 400) || null,
+    to: Array.isArray(summary.to) ? summary.to.filter((item) => typeof item === 'string').slice(0, 3).map((item) => item.slice(0, 400)) : [],
+    recipients: byteCount(summary.recipients),
+    attachments: byteCount(summary.attachments),
+    html: summary.html === true,
+    transport: text(summary.transport, 64) || null,
+    status: summary.status === 'failed' ? 'failed' : 'sent',
+    duration: Number.isFinite(summary.duration) && summary.duration >= 0 ? summary.duration : null,
+    error: error ? { name: text(error.name, 200) || 'Error', message: text(error.message, 300) } : null,
+    detail
+  };
+}
+
 // Where in the app something happened: an absolute file, the same relative to the project, a line.
 function readCaller(value) {
   if (!value || typeof value !== 'object' || typeof value.file !== 'string' || !value.file) return null;
@@ -383,6 +444,64 @@ function readSamples(value) {
     }
     return [clean];
   });
+}
+
+// Where the heap was held, now and then. A malformed profile is skipped, as is a malformed line of one.
+function readHeapWindows(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-MAX_HEAP_WINDOWS).flatMap((window) => {
+    if (!window || typeof window !== 'object' || !Number.isFinite(window.at) || !Array.isArray(window.sites)) return [];
+    if (!Number.isFinite(window.total) || window.total < 0 || window.total > 1e13) return [];
+    return [{
+      at: window.at,
+      reason: window.reason === 'pressure' ? 'pressure' : 'interval',
+      total: Math.round(window.total),
+      sites: window.sites.slice(0, MAX_HEAP_SITES).flatMap(readHeapSite)
+    }];
+  });
+}
+
+function readHeapSite(site) {
+  const location = readSite(site);
+  if (!location || !Number.isFinite(site.bytes) || site.bytes < 0 || site.bytes > 1e13) return [];
+  return [{ ...location, bytes: Math.round(site.bytes) }];
+}
+
+// When the loop was blocked, and what ran meanwhile. A malformed window is skipped, as is a
+// malformed function of one.
+function readBlockWindows(value) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(-MAX_BLOCK_WINDOWS).flatMap((window) => {
+    if (!window || typeof window !== 'object' || !Number.isFinite(window.at) || !Array.isArray(window.sites)) return [];
+    if (!Number.isInteger(window.count) || window.count < 1 || window.count > 1e6) return [];
+    if (!isMs(window.total) || !isMs(window.worst)) return [];
+    return [{ at: window.at, count: window.count, total: window.total, worst: window.worst, sites: window.sites.slice(0, MAX_BLOCK_SITES).flatMap(readBlockSite) }];
+  });
+}
+
+function readBlockSite(site) {
+  const location = readSite(site);
+  if (!location || !isMs(site.ms) || !isMs(site.max) || !Number.isInteger(site.blocks) || site.blocks < 1) return [];
+  return [{ ...location, calls: optionalText(site.calls, 1024), ms: site.ms, blocks: site.blocks, max: site.max }];
+}
+
+// A function in a profile: its id and where it is.
+function readSite(site) {
+  if (!site || typeof site !== 'object' || typeof site.id !== 'string' || !SITE_ID.test(site.id)) return null;
+  return {
+    id: site.id,
+    function: optionalText(site.function, 1024),
+    file: optionalText(site.file, 4096),
+    relativeFile: optionalText(site.relativeFile, 4096),
+    line: positiveInt(site.line),
+    column: positiveInt(site.column),
+    package: optionalText(site.package, 214),
+    inApp: site.inApp === true
+  };
+}
+
+function isMs(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 1e9;
 }
 
 function readLocation(value) {
@@ -436,6 +555,10 @@ function release(value) {
 
 function text(value, max) {
   return typeof value === 'string' ? value.slice(0, max) : '';
+}
+
+function optionalText(value, max) {
+  return typeof value === 'string' && value ? value.slice(0, max) : null;
 }
 
 function byteCount(value) {

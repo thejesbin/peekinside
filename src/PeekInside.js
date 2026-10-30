@@ -26,10 +26,12 @@
 import { ExchangeRecorder } from './capture/exchange-recorder.js';
 import { splitUrl } from './capture/http-message.js';
 import { isIgnoredPath } from './capture/ignored-paths.js';
+import { readReplay } from './capture/replay.js';
 import { LOG_PREFIX, VERSION, settings } from './config.js';
 import { TrafficClassifier } from './deployment.js';
 import { ExceptionCapture } from './exceptions/exception-capture.js';
 import { DumpCapture } from './dumps/dump-capture.js';
+import { MailCapture } from './mail/mail-capture.js';
 import { ProcessMonitor } from './exceptions/process-monitor.js';
 import { RequestContext } from './exceptions/request-context.js';
 import { Instrumentation } from './instrumentation/index.js';
@@ -48,6 +50,8 @@ import { JobRunner } from './jobs/job-runner.js';
 import { LogCapture } from './logs/log-capture.js';
 import { LoopMonitor } from './runtime/loop-monitor.js';
 import { RuntimeSampler } from './runtime/sampler.js';
+import { HeapProfiler } from './runtime/heap-profiler.js';
+import { BlockRecorder } from './runtime/cpu-profiler.js';
 import { RequestCounter } from './runtime/request-counter.js';
 import { UserInfo } from './user.js';
 import { CloudTransport } from './transport/cloud.js';
@@ -61,6 +65,9 @@ const DEFAULT_OPTIONS = {
   sourceMaps: true,
   runtime: true,
   captureJobs: true,
+  captureMail: true,
+  heapProfiling: true,
+  cpuProfiling: true,
   logLevel: 'info',
   timeline: true,
   ...TIMELINE_DEFAULTS
@@ -127,6 +134,15 @@ class PeekInside {
    *   page records
    * @param {boolean} [options.captureJobs=true] - Runs of node-cron, cron, BullMQ and
    *   @nestjs/schedule jobs
+   * @param {boolean} [options.captureMail=true] - Emails sent with nodemailer, previewed on the
+   *   local dashboard's Mail page (never sent to PeekInside Cloud)
+   * @param {boolean} [options.heapProfiling=true] - Sample the heap to name the functions that hold
+   *   growing memory (the Runtime page's leak findings); needs `runtime`. With PeekInside Cloud, it
+   *   runs on the plans that include it
+   * @param {boolean} [options.cpuProfiling=true] - Sample what the thread runs to name the
+   *   functions behind each event-loop block, on the timelines of the requests that waited and on
+   *   the Runtime page; needs `runtime` and `loopBlockMs`. With PeekInside Cloud, it runs on the
+   *   plans that include it
    * @param {boolean} [options.queryParams=true] - Keep the (masked) values sent with queries
    * @param {number} [options.slowQueryMs=100] - Queries this slow or slower are flagged
    * @param {number} [options.nPlusOneThreshold=5] - A statement run this many times in one request
@@ -168,12 +184,17 @@ class PeekInside {
     // Whether this instance uses the event-loop monitor, and its process sampler.
     this._loopMonitor = false;
     this._sampler = null;
+    // Where the heap's memory is held (see HeapProfiler); null when the heap isn't sampled.
+    this._heap = null;
+    // What blocked the event loop (see BlockRecorder); null when the CPU isn't sampled.
+    this._blocks = null;
     // The requests this instance serves, counted for its process samples.
     this._requests = null;
-    // Log lines for the Logs page, job runs, and dumps (local mode only).
+    // Log lines for the Logs page, job runs, and dumps and emails (local mode only).
     this._logs = null;
     this._jobs = null;
     this._dumps = null;
+    this._mails = null;
     this._servers = new ServerBinder(this, { onListening: (port) => this._onAppListening(port) });
 
     const environment = this.options.environment || settings.environment();
@@ -231,11 +252,40 @@ class PeekInside {
       if (this.options.runtime !== false) {
         const transport = this._transport;
         this._requests = new RequestCounter();
+        // Profiles: locally a window a minute, while you reproduce a leak or a block; on servers
+        // every five minutes, once PeekInside Cloud says the plan includes them (see
+        // CloudTransport#onFeatures).
+        const period = this._cloud ? 5 * 60_000 : 60_000;
+        if (this.options.heapProfiling !== false) {
+          this._heap = new HeapProfiler({ builder: this._exceptions.builder, intervalMs: period, onWindow: (window) => transport.addHeapWindow(window) });
+        }
+        const loopBlockMs = TimelineSettings.loopBlockMs(this.options);
+        if (this.options.cpuProfiling !== false && loopBlockMs) {
+          this._blocks = new BlockRecorder({ builder: this._exceptions.builder, thresholdMs: loopBlockMs, periodMs: period, onWindow: (window) => transport.addBlockWindow(window) });
+        }
+        if (this._local && this._heap) this._heap.start();
+        // The CPU profiler starts with the app on servers too, before PeekInside Cloud answers: V8
+        // can't place loops it optimized before the profiler started (see CpuProfiler).
+        if (this._blocks) this._blocks.start();
+        if (this._cloud && (this._heap || this._blocks)) {
+          this._cloud.onFeatures((features) => {
+            if (this._heap && features.heapProfiling) this._heap.start();
+            else if (this._heap) this._heap.stop();
+            if (this._blocks && features.cpuProfiling) this._blocks.start();
+            else if (this._blocks) this._blocks.stop();
+          });
+        }
         this._sampler = new RuntimeSampler({
           intervalMs: this._cloud ? 60_000 : 10_000,
           monitor: LoopMonitor.shared,
           requests: this._requests,
-          onSample: (sample) => transport.addSample(sample)
+          onSample: (sample) => {
+            transport.addSample(sample);
+            if (this._heap && underPressure(sample)) {
+              // Near the limit: what holds the memory goes out now, before the process may die.
+              if (this._heap.take('pressure')) void transport.flush();
+            }
+          }
         }).start();
       }
 
@@ -248,6 +298,9 @@ class PeekInside {
       }
       if (this._local) {
         this._dumps = new DumpCapture({ capture: this._exceptions, sink: () => this._transport, isEnabled: () => this.isEnabled });
+        if (this.options.captureMail !== false) {
+          this._mails = new MailCapture({ capture: this._exceptions, sink: () => this._transport, isEnabled: () => this.isEnabled });
+        }
       }
       this._jobs = new JobRunner({
         capture: this._exceptions,
@@ -260,7 +313,8 @@ class PeekInside {
         queries: Boolean(this._timeline && this._timeline.captureQueries),
         outgoing: Boolean(this._timeline && this._timeline.captureOutgoing),
         logs,
-        jobs: this.options.captureJobs !== false
+        jobs: this.options.captureJobs !== false,
+        mail: Boolean(this._mails)
       });
     }
   }
@@ -687,6 +741,14 @@ class PeekInside {
       this._sampler.stop();
       this._sampler = null;
     }
+    if (this._heap) {
+      this._heap.stop();
+      this._heap = null;
+    }
+    if (this._blocks) {
+      this._blocks.stop();
+      this._blocks = null;
+    }
     if (this._loopMonitor) {
       this._loopMonitor = false;
       LoopMonitor.release();
@@ -748,6 +810,8 @@ class PeekInside {
     const requests = this._requests;
     const recorder = new ExchangeRecorder(req, res, target, {
       maxBodySize: () => this.options.maxBodySize,
+      // A replay from the local dashboard takes the id the hub gave it (see capture/replay.js).
+      replay: this._local ? readReplay(req.headers) : null,
       onExchange: (exchange) => {
         // Exceptions and timeline first: the record is built from the completed exchange.
         if (context) {
@@ -792,6 +856,14 @@ class PeekInside {
 }
 
 function noop() {}
+
+// A heap past 90% of its limit, or a process past 90% of the memory its container allows.
+function underPressure(sample) {
+  if (sample.heapLimit && sample.heapUsed >= sample.heapLimit * 0.9) return true;
+  const allowed = typeof process.constrainedMemory === 'function' ? process.constrainedMemory() : 0;
+  // Without a container limit, Node reports 0 or a huge number.
+  return Boolean(allowed) && allowed < 2 ** 50 && sample.rss >= allowed * 0.9;
+}
 
 // Options left undefined must not override the defaults.
 function definedOnly(options) {

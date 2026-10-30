@@ -105,6 +105,7 @@ export class SpoolIngester {
     this.store.appendJobs(payload.project.id, payload.jobs);
     this.store.appendLogs(payload.project.id, payload.logs);
     this.store.appendDumps(payload.project.id, payload.dumps);
+    this.store.appendMails(payload.project.id, payload.mails);
     spool.remove(name);
     return { requests, exceptions };
   }

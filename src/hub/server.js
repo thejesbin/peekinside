@@ -2,7 +2,7 @@
  * The local hub's HTTP server, on 127.0.0.1 only.
  *
  *   GET    /                                   Dashboard page (also /p/<project id>, and its
- *                                              /exceptions, /routes, /queries, /logs, /jobs, /dumps and /runtime)
+ *                                              /exceptions, /routes, /queries, /logs, /jobs, /dumps, /mail, /runtime and /mcp)
  *   POST   /api/ingest                         Requests and exceptions from the SDK in each app, and
  *                                              counts of server requests it didn't record (free plan)
  *   GET    /api/status                         Hub version and settings
@@ -10,10 +10,12 @@
  *   GET    /api/projects/:id/requests          Summaries. Query: limit, before or after (sequence numbers)
  *   GET    /api/projects/:id/requests/:rid     One request's full detail
  *   DELETE /api/projects/:id/requests          Delete a project's requests
+ *   POST   /api/projects/:id/replays           Send a stored request to its app again ({ requestId })
  *   GET    /api/projects/:id/exceptions        Exception summaries, paged like requests
  *   GET    /api/projects/:id/exceptions/:eid   One exception's full detail
  *   DELETE /api/projects/:id/exceptions        Delete a project's exceptions
- *   GET    /api/projects/:id/runtime           Recent processes with their memory, CPU and event-loop samples
+ *   GET    /api/projects/:id/runtime           Recent processes with their memory, CPU and event-loop samples, where
+ *                                              their heap is held, and what blocked their event loop
  *   GET    /api/projects/:id/jobs              Job run summaries, paged like requests
  *   GET    /api/projects/:id/jobs/:jid         One job run's detail
  *   DELETE /api/projects/:id/jobs              Delete a project's job runs
@@ -23,9 +25,17 @@
  *   GET    /api/projects/:id/dumps             Dumps (a preview of each value), paged like requests
  *   GET    /api/projects/:id/dumps/:did        One dump's value
  *   DELETE /api/projects/:id/dumps             Delete a project's dumps
+ *   GET    /api/projects/:id/mails             Emails the app sent (who to, the subject), paged like requests
+ *   GET    /api/projects/:id/mails/:mid        One email's message
+ *   GET    /api/projects/:id/mails/:mid/html   Its HTML, for the Mail page's preview frame (?images=1
+ *                                              loads remote images)
+ *   DELETE /api/projects/:id/mails             Delete a project's emails
  *   GET    /api/projects/:id/exception-state   Resolved issues, with a version
  *   PUT    /api/projects/:id/exception-state   Save them, if the version is still the current one
  *   DELETE /api/projects/:id                   Forget a project
+ *   POST   /mcp                                The Model Context Protocol, for AI tools (Streamable
+ *                                              HTTP, answers in JSON): see mcp/. ?project=<id> names
+ *                                              the project tools read when they aren't told
  *   GET    /brand/<file>                       The PeekInside mark, for the page's icon (also
  *                                              /favicon.svg and /favicon.ico)
  *
@@ -41,17 +51,27 @@ import { readFileSync } from 'fs';
 import { HUB_API_VERSION, HUB_APP_ID } from '../config.js';
 import { ExceptionState } from './exception-state.js';
 import { IngestPayload, REQUEST_ID } from './ingest-payload.js';
-import { DEFAULT_MAX_DUMPS, PROJECT_ID } from './store.js';
+import { DEFAULT_REPLAY_TIMEOUT_MS, Replay, ReplayError } from './replay.js';
+import { DEFAULT_MAX_DUMPS, DEFAULT_MAX_MAILS, PROJECT_ID } from './store.js';
+import { McpServer } from '../mcp/server.js';
+import { StoreSource } from '../mcp/sources.js';
+import { Toolbox } from '../mcp/tools.js';
 
 const MAX_INGEST_BYTES = 32 * 1024 * 1024;
 // 5000 fingerprints with their timestamps take about 200 KB.
 const MAX_STATE_BYTES = 1024 * 1024;
+// A replay names one request.
+const MAX_REPLAY_BYTES = 4096;
+// An MCP message names a tool and its arguments.
+const MAX_MCP_BYTES = 1024 * 1024;
 const DEFAULT_PAGE = 500;
 const MAX_PAGE = 1000;
 // /api/projects/:id, then optionally a collection and an item.
-const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(?:\/(requests|exceptions|exception-state|runtime|jobs|logs|dumps)(?:\/([^/]+))?)?$/;
+const PROJECT_ROUTE = /^\/api\/projects\/([^/]+)(?:\/(requests|exceptions|exception-state|runtime|jobs|logs|dumps|mails|replays)(?:\/([^/]+))?)?$/;
+// An email's HTML, for the preview frame.
+const MAIL_HTML_ROUTE = /^\/api\/projects\/([^/]+)\/mails\/([^/]+)\/html$/;
 // The dashboard page: the project list, a project's requests, its exceptions and its queries.
-const SHELL_ROUTE = /^\/p\/[a-z0-9-]{1,64}(?:\/(?:exceptions|routes|queries|runtime|logs|jobs|dumps))?\/?$/;
+const SHELL_ROUTE = /^\/p\/[a-z0-9-]{1,64}(?:\/(?:exceptions|routes|queries|runtime|logs|jobs|dumps|mail|mcp))?\/?$/;
 
 const BASE_HEADERS = {
   'X-Content-Type-Options': 'nosniff',
@@ -93,14 +113,16 @@ export class HubServer {
    * @param {string} options.dataDir - Data folder, shown in the dashboard
    * @param {Function} [options.onActivity] - Called for every API request and ingest, to tell
    *   whether the hub is still in use
+   * @param {number} [options.replayTimeoutMs] - Longest wait for an app to answer a replay
    */
-  constructor({ store, port, siteUrl, version, dataDir, onActivity = () => {} }) {
+  constructor({ store, port, siteUrl, version, dataDir, onActivity = () => {}, replayTimeoutMs = DEFAULT_REPLAY_TIMEOUT_MS }) {
     this.store = store;
     this.port = port;
     this.siteUrl = siteUrl;
     this.version = version;
     this.dataDir = dataDir;
     this.onActivity = onActivity;
+    this.replayTimeoutMs = replayTimeoutMs;
     // The names this server is reached by. Any other Host means DNS rebinding: a foreign site
     // whose domain resolves to 127.0.0.1.
     this._hosts = new Set([`localhost:${port}`, `127.0.0.1:${port}`, `[::1]:${port}`]);
@@ -154,8 +176,13 @@ export class HubServer {
       siteUrl: this.siteUrl,
       maxRequests: this.store.maxRequests,
       maxExceptions: this.store.maxExceptions,
-      // Also tells the dashboard this hub keeps dumps (older ones don't).
-      maxDumps: DEFAULT_MAX_DUMPS
+      // Also tells the dashboard this hub keeps dumps, and emails (older ones don't).
+      maxDumps: DEFAULT_MAX_DUMPS,
+      maxMails: DEFAULT_MAX_MAILS,
+      // Tells the dashboard this hub replays requests (older ones don't).
+      replay: true,
+      // And that it serves AI tools at /mcp.
+      mcp: true
     };
   }
 
@@ -183,6 +210,14 @@ export class HubServer {
     if (pathname === '/api/ingest') {
       this.onActivity();
       return this._ingest(req, res);
+    }
+    if (pathname === '/mcp') {
+      // AI tools aren't browsers: a page of another site can't use it, as for the API.
+      if (!isSameOrigin(req, host)) {
+        return sendJson(res, 403, { error: 'Only AI tools on this machine can use this endpoint.' });
+      }
+      this.onActivity();
+      return this._mcp(req, res, searchParams);
     }
     if (pathname.startsWith('/api/')) {
       if (!isSameOrigin(req, host)) {
@@ -246,9 +281,12 @@ export class HubServer {
     const addedExceptions = this.store.appendExceptions(payload.project.id, payload.exceptions);
     this.store.noteBlocked(payload.project.id, payload.blocked);
     this.store.addSamples(payload.project.id, payload.instance, payload.samples);
+    this.store.addHeapWindows(payload.project.id, payload.instance, payload.heapWindows);
+    this.store.addBlockWindows(payload.project.id, payload.instance, payload.blockWindows);
     const addedJobs = this.store.appendJobs(payload.project.id, payload.jobs);
     const addedLogs = this.store.appendLogs(payload.project.id, payload.logs);
     const addedDumps = this.store.appendDumps(payload.project.id, payload.dumps);
+    const addedMails = this.store.appendMails(payload.project.id, payload.mails);
     // SDKs from before exceptions get the answer they know.
     return sendJson(res, 200, payload.hasExceptions
       ? {
@@ -258,9 +296,10 @@ export class HubServer {
         rejectedExceptions: payload.rejectedExceptions,
         acceptedJobs: addedJobs.length,
         acceptedLogs: addedLogs.length,
-        acceptedDumps: addedDumps.length
+        acceptedDumps: addedDumps.length,
+        acceptedMails: addedMails.length
       }
-      : { accepted: added.length, rejected: payload.rejected, acceptedJobs: addedJobs.length, acceptedLogs: addedLogs.length, acceptedDumps: addedDumps.length });
+      : { accepted: added.length, rejected: payload.rejected, acceptedJobs: addedJobs.length, acceptedLogs: addedLogs.length, acceptedDumps: addedDumps.length, acceptedMails: addedMails.length });
   }
 
   // Every /api/ route except ingest; the caller has checked the origin.
@@ -272,6 +311,11 @@ export class HubServer {
     }
     if (pathname === '/api/projects') {
       return read ? sendJson(res, 200, { projects: this.store.listProjects() }) : methodNotAllowed(res, 'GET, HEAD');
+    }
+
+    const html = MAIL_HTML_ROUTE.exec(pathname);
+    if (html) {
+      return this._mailHtml(req, res, decode(html[1]), decode(html[2]), query);
     }
 
     const match = PROJECT_ROUTE.exec(pathname);
@@ -310,9 +354,16 @@ export class HubServer {
       if (item !== undefined) return this._item(req, res, decode(item), (id) => this.store.dumpDetail(projectId, id), 'This dump is no longer stored.');
       return this._collection(req, res, query, () => this.store.listDumps(projectId, pageOf(query)), () => this.store.clearDumps(projectId));
     }
+    if (collection === 'mails') {
+      if (item !== undefined) return this._item(req, res, decode(item), (id) => this.store.mailDetail(projectId, id), 'This email is no longer stored.');
+      return this._collection(req, res, query, () => this.store.listMails(projectId, pageOf(query)), () => this.store.clearMails(projectId));
+    }
     if (collection === 'runtime') {
       if (item !== undefined) return sendJson(res, 404, { error: 'Not found' });
       return read ? sendJson(res, 200, this.store.runtime(projectId)) : methodNotAllowed(res, 'GET, HEAD');
+    }
+    if (collection === 'replays') {
+      return item === undefined ? this._replay(req, res, projectId) : sendJson(res, 404, { error: 'Not found' });
     }
     return item === undefined ? this._exceptionState(req, res, projectId) : sendJson(res, 404, { error: 'Not found' });
   }
@@ -363,6 +414,115 @@ export class HubServer {
     return detail
       ? sendJson(res, 200, { detail })
       : sendJson(res, 404, { error: 'This request is no longer stored.' });
+  }
+
+  // GET /api/projects/:id/mails/:mid/html: an email's HTML, for the Mail page's preview frame. Its
+  // own policy keeps it inert: a sandbox (no scripts, no access to this page), nothing loaded from
+  // elsewhere unless the dashboard asks for remote images (?images=1: a tracking pixel would count
+  // an open), and only this page may frame it. Links open in a new tab.
+  _mailHtml(req, res, projectId, mailId, query) {
+    if (!isRead(req)) return methodNotAllowed(res, 'GET, HEAD');
+    const detail = PROJECT_ID.test(projectId) && REQUEST_ID.test(mailId) ? this.store.mailDetail(projectId, mailId) : null;
+    if (!detail || typeof detail.html !== 'string') {
+      return sendText(res, 404, 'This email has no HTML stored.');
+    }
+    const remote = query.get('images') === '1' ? ' https: http:' : '';
+    const csp = [
+      "default-src 'none'",
+      "style-src 'unsafe-inline'",
+      `img-src data:${remote}`,
+      `font-src data:${remote}`,
+      'sandbox allow-popups allow-popups-to-escape-sandbox',
+      "form-action 'none'",
+      "frame-ancestors 'self'"
+    ].join('; ');
+    send(res, 200, previewDocument(detail.html), {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Content-Security-Policy': csp,
+      'X-Frame-Options': 'SAMEORIGIN'
+    }, req.method === 'HEAD');
+  }
+
+  // POST /api/projects/:id/replays { requestId }: sends a stored request to its app again, and
+  // answers with the id the replay's record takes and the app's status (see replay.js). Like
+  // every change, only this page may ask: the Origin check above stops other sites.
+  async _replay(req, res, projectId) {
+    if (req.method !== 'POST') {
+      return methodNotAllowed(res, 'POST');
+    }
+    if (!/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) {
+      return sendJson(res, 415, { error: 'Expected application/json' });
+    }
+
+    let body;
+    try {
+      body = JSON.parse(await readBody(req, MAX_REPLAY_BYTES));
+    } catch (error) {
+      if (error && error.status === 413) {
+        res.setHeader('Connection', 'close');
+        return sendJson(res, 413, { error: 'Too large' });
+      }
+      return sendJson(res, 400, { error: 'Invalid JSON' });
+    }
+
+    const requestId = body && body.requestId;
+    if (typeof requestId !== 'string' || !REQUEST_ID.test(requestId)) {
+      return sendJson(res, 400, { error: 'Expected { requestId }' });
+    }
+    const source = this.store.replaySource(projectId, requestId);
+    if (!source) {
+      return sendJson(res, 404, { error: 'This request is no longer stored.' });
+    }
+    try {
+      return sendJson(res, 200, { replay: await Replay.run(source, { timeoutMs: this.replayTimeoutMs }) });
+    } catch (error) {
+      if (error instanceof ReplayError) return sendJson(res, error.status, { error: error.message });
+      throw error;
+    }
+  }
+
+  // POST /mcp: one MCP message (or a batch). Answers in JSON; notifications get 202 and no body.
+  async _mcp(req, res, query) {
+    if (req.method !== 'POST') {
+      return methodNotAllowed(res, 'POST');
+    }
+    if (!/^application\/json\b/i.test(String(req.headers['content-type'] || ''))) {
+      return sendJson(res, 415, { error: 'Expected application/json' });
+    }
+    let message;
+    try {
+      message = JSON.parse(await readBody(req, MAX_MCP_BYTES));
+    } catch (error) {
+      if (error && error.status === 413) {
+        res.setHeader('Connection', 'close');
+        return sendJson(res, 413, { error: 'Too large' });
+      }
+      return sendJson(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+    }
+    const response = await this._mcpServer(query.get('project')).handle(message);
+    if (!response) {
+      send(res, 202, '', { 'Cache-Control': 'no-store' });
+      return undefined;
+    }
+    return sendJson(res, 200, response);
+  }
+
+  // One MCP server per default project, so what a tool reads is reused by the next call.
+  _mcpServer(project) {
+    const key = project && PROJECT_ID.test(project) ? project : '';
+    this._mcpServers = this._mcpServers || new Map();
+    let server = this._mcpServers.get(key);
+    if (!server) {
+      const source = new StoreSource(this.store, {
+        dashboardUrl: `http://localhost:${this.port}`,
+        replay: (stored) => Replay.run(stored, { timeoutMs: this.replayTimeoutMs })
+      });
+      server = new McpServer({ toolbox: new Toolbox({ source, project: key || null, cwd: null }), version: this.version });
+      if (this._mcpServers.size >= 20) this._mcpServers.delete(this._mcpServers.keys().next().value);
+      this._mcpServers.set(key, server);
+    }
+    return server;
   }
 
   // /api/projects/:id/exceptions
@@ -439,6 +599,8 @@ export class HubServer {
       "img-src 'self' data:",
       `font-src ${assetOrigins}`,
       "connect-src 'self'",
+      // The Mail page's preview: an email's HTML, served by this hub with its own sandbox.
+      "frame-src 'self'",
       "base-uri 'none'",
       "form-action 'none'",
       "frame-ancestors 'none'"
@@ -486,6 +648,16 @@ function siteOrigins(siteUrl) {
     origins.push(twin.origin);
   }
   return origins.join(' ');
+}
+
+// The email's HTML as the preview frame shows it: links open in a new tab, and the page is white
+// where the email doesn't paint, as in a mail client (the dashboard behind it may be dark).
+function previewDocument(html) {
+  const extra = '<base target="_blank"><style>:root{color-scheme:light;background:#fff}</style>';
+  const head = /<head(?:\s[^>]*)?>/i.exec(html);
+  if (!head) return extra + html;
+  const at = head.index + head[0].length;
+  return html.slice(0, at) + extra + html.slice(at);
 }
 
 function isRead(req) {

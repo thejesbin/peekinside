@@ -32,9 +32,10 @@ export class RequestRecord {
    *   lists the first of them)
    * @param {Object} [fields.stats] - Timeline counters: queries, queryTime, slowQueries, nPlusOne,
    *   duplicates, http, httpTime, logs (detail.timeline holds the spans); absent when the timeline is off
-   * @param {{ url: string, path: string, contentType: string, route?: string, handler?: string, user?: Object }} fields.summary -
+   * @param {{ url: string, path: string, contentType: string, route?: string, handler?: string, user?: Object, replayOf?: string }} fields.summary -
    *   Shown in the request list: with the route pattern and the handler when the framework says
-   *   (NestJS, Hono, Fastify), and the user when the app set one
+   *   (NestJS, Hono, Fastify), the user when the app set one, and the request it sends again
+   *   when the local dashboard replayed one
    * @param {Object} fields.detail - Everything else: headers, bodies, query, client details
    */
   constructor({ id, occurredAt, environment, release = null, method, status, duration, requestSize, responseSize, aborted, exceptionCount = 0, stats, summary, detail }) {
@@ -86,7 +87,8 @@ export class RequestRecord {
         contentType: headerValue(response.headers, 'content-type'),
         ...(exchange.route ? { route: exchange.route } : {}),
         ...(exchange.handler ? { handler: exchange.handler } : {}),
-        ...(exchange.user ? { user: exchange.user } : {})
+        ...(exchange.user ? { user: exchange.user } : {}),
+        ...(exchange.replayOf ? { replayOf: exchange.replayOf } : {})
       },
       detail: {
         query: exchange.query,
@@ -110,6 +112,7 @@ export class RequestRecord {
         },
         exceptions: Array.isArray(exchange.exceptions) ? exchange.exceptions.slice(0, MAX_EXCEPTION_LINKS) : [],
         ...(Array.isArray(exchange.dumps) && exchange.dumps.length ? { dumps: exchange.dumps } : {}),
+        ...(Array.isArray(exchange.mails) && exchange.mails.length ? { mails: exchange.mails } : {}),
         ...(exchange.timeline ? { timeline: exchange.timeline } : {})
       }
     });

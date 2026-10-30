@@ -135,11 +135,11 @@ test('ingest stores exceptions next to requests and rejects malformed ones', asy
     }
   });
   assert.equal(response.status, 200);
-  assert.deepEqual(response.json, { accepted: 1, rejected: 0, acceptedExceptions: 2, rejectedExceptions: 4, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0 });
+  assert.deepEqual(response.json, { accepted: 1, rejected: 0, acceptedExceptions: 2, rejectedExceptions: 4, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0, acceptedMails: 0 });
 
   // Batches without an exception list (older SDKs) get the answer they know.
   const legacy = await request('POST', '/api/ingest', { headers: SDK, body: { project: PROJECT, instance: INSTANCE, requests: [] } });
-  assert.deepEqual(legacy.json, { accepted: 0, rejected: 0, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0 });
+  assert.deepEqual(legacy.json, { accepted: 0, rejected: 0, acceptedJobs: 0, acceptedLogs: 0, acceptedDumps: 0, acceptedMails: 0 });
 
   const tooMany = Array.from({ length: 501 }, (_, i) => exception(100 + i));
   assert.equal((await request('POST', '/api/ingest', { headers: SDK, body: { project: PROJECT, instance: INSTANCE, requests: [], exceptions: tooMany } })).status, 400);

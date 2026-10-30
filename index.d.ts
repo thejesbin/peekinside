@@ -129,6 +129,14 @@ export interface PeekInsideOptions {
   captureJobs?: boolean;
 
   /**
+   * Records the emails the app sends with nodemailer, for the local dashboard's Mail page: the
+   * message as it was sent (HTML, text, headers, attachments' names), linked to its request or
+   * job. Local dashboard only: PeekInside Cloud never gets them.
+   * @default true
+   */
+  captureMail?: boolean;
+
+  /**
    * Keeps the values sent with queries, masked (passwords, tokens and secret-looking values
    * never leave the process).
    * @default true
@@ -161,6 +169,24 @@ export interface PeekInsideOptions {
    * @default true
    */
   runtime?: boolean;
+
+  /**
+   * Samples the heap (V8's sampling heap profiler: a sample per 512 KiB allocated) to name the
+   * functions that hold memory, and those whose memory keeps growing: the Runtime page's leak
+   * findings. Only code locations and byte counts leave the process, never values. Needs
+   * `runtime`. With PeekInside Cloud, it runs on the plans that include it (Pro and up).
+   * @default true
+   */
+  heapProfiling?: boolean;
+
+  /**
+   * Samples what the main thread runs (V8's CPU profiler, every 10 ms) to name the functions
+   * behind each event-loop block: on the timelines of the requests that waited, and on the
+   * Runtime page. Only code locations and times leave the process. Needs `runtime` and
+   * `loopBlockMs`. With PeekInside Cloud, it runs on the plans that include it (Pro and up).
+   * @default true
+   */
+  cpuProfiling?: boolean;
 }
 
 /** Options of `job()`. */

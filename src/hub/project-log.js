@@ -9,9 +9,11 @@
  *   jobs/00000001.*          job runs, in the same format
  *   logs/00000001.*          log lines: the index keeps the start of each line, the details the rest
  *   dumps/00000001.*         dumps: the index keeps a preview of each value, the details its tree
+ *   mails/00000001.*         emails: the index keeps who to and the subject, the details the message
  *
- * Process samples (memory, CPU, event-loop delay) are kept in memory only, for the Runtime page:
- * the last six hours of each of the project's recent processes.
+ * Process samples (memory, CPU, event-loop delay), heap profiles (the code holding the most
+ * memory) and windows of event-loop blocks (the code that ran during them) are kept in memory
+ * only, for the Runtime page: the last six hours of each of the project's recent processes.
  *
  * Both logs are SegmentLogs (see segment-log.js): summaries in memory, details read on demand,
  * retention by deleting whole segment files. The project keeps its newest `maxRequests` requests
@@ -33,16 +35,27 @@ const MAX_BLOCKED_ENTRIES = 10;
 // Samples kept per process (six hours at one every 10 seconds), and processes kept per project.
 const MAX_RUNTIME_SAMPLES = 2160;
 const MAX_RUNTIME_PROCESSES = 8;
+// Heap profiles kept per process, for six hours like the samples: one a minute for the last hour,
+// then one every five minutes (a trend over hours needs no more), and those read as the heap neared
+// its limit.
+const HEAP_KEEP_MS = 6 * 60 * 60_000;
+const HEAP_DENSE_MS = 60 * 60_000;
+const HEAP_SPARSE_MS = 5 * 60_000;
+const MAX_HEAP_WINDOWS = 150;
+// Windows of event-loop blocks kept per process: six hours of one a minute.
+const MAX_BLOCK_WINDOWS = 360;
 // Fields a summary may contain, in the order they are written.
-const SUMMARY_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'method', 'status', 'duration', 'requestSize', 'responseSize', 'aborted', 'exceptionCount', 'stats', 'url', 'path', 'contentType', 'route', 'handler', 'user'];
+const SUMMARY_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'method', 'status', 'duration', 'requestSize', 'responseSize', 'aborted', 'exceptionCount', 'stats', 'url', 'path', 'contentType', 'route', 'handler', 'user', 'replayOf'];
 const EXCEPTION_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'handled', 'fatal', 'requestId', 'jobRunId', 'name', 'message', 'code', 'fingerprint', 'mechanism', 'location', 'request', 'job', 'user'];
 const JOB_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'name', 'queue', 'schedule', 'timezone', 'trigger', 'status', 'duration', 'attempt', 'exceptionCount', 'stats', 'error', 'user'];
 const LOG_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'level', 'source', 'requestId', 'jobRunId', 'message'];
 const DUMP_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'requestId', 'jobRunId', 'label', 'location', 'type', 'preview', 'truncated'];
+const MAIL_FIELDS = ['seq', 'id', 'occurredAt', 'environment', 'release', 'requestId', 'jobRunId', 'location', 'subject', 'from', 'to', 'recipients', 'attachments', 'html', 'transport', 'status', 'duration', 'error'];
 const EXCEPTIONS_FOLDER = 'exceptions';
 const JOBS_FOLDER = 'jobs';
 const LOGS_FOLDER = 'logs';
 const DUMPS_FOLDER = 'dumps';
+const MAILS_FOLDER = 'mails';
 
 /**
  * @typedef {Object} ProjectInfo
@@ -75,7 +88,8 @@ export class ProjectLog {
    * @param {number} limits.maxJobs - Job runs kept
    * @param {number} limits.maxLogs - Log lines kept
    * @param {number} limits.maxDumps - Dumps kept
-   * @param {{ requests?: SegmentLog, exceptions?: SegmentLog, jobs?: SegmentLog, logs?: SegmentLog, dumps?: SegmentLog }} [logs] - Logs
+   * @param {number} limits.maxMails - Emails kept
+   * @param {{ requests?: SegmentLog, exceptions?: SegmentLog, jobs?: SegmentLog, logs?: SegmentLog, dumps?: SegmentLog, mails?: SegmentLog }} [logs] - Logs
    *   read from disk
    */
   constructor(dir, info, limits, logs = {}) {
@@ -87,6 +101,7 @@ export class ProjectLog {
     this.jobs = logs.jobs || new SegmentLog(path.join(dir, JOBS_FOLDER), ProjectLog._jobOptions(info, limits));
     this.logs = logs.logs || new SegmentLog(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits));
     this.dumps = logs.dumps || new SegmentLog(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits));
+    this.mails = logs.mails || new SegmentLog(path.join(dir, MAILS_FOLDER), ProjectLog._mailOptions(info, limits));
     this.exceptionState = new ExceptionState(dir);
     // Processes running the project, by pid. In memory only: they check in again after a restart.
     this.instances = new Map();
@@ -117,7 +132,8 @@ export class ProjectLog {
       exceptionSeqBase: 1,
       jobSeqBase: 1,
       logSeqBase: 1,
-      dumpSeqBase: 1
+      dumpSeqBase: 1,
+      mailSeqBase: 1
     }, limits);
     project.save();
     return project;
@@ -145,6 +161,7 @@ export class ProjectLog {
       jobSeqBase: Number(saved.jobSeqBase) || 1,
       logSeqBase: Number(saved.logSeqBase) || 1,
       dumpSeqBase: Number(saved.dumpSeqBase) || 1,
+      mailSeqBase: Number(saved.mailSeqBase) || 1,
       ...(isBlockedInfo(saved.blocked) ? { blocked: saved.blocked } : {})
     };
     return new ProjectLog(dir, info, limits, {
@@ -152,7 +169,8 @@ export class ProjectLog {
       exceptions: SegmentLog.load(path.join(dir, EXCEPTIONS_FOLDER), ProjectLog._exceptionOptions(info, limits)),
       jobs: SegmentLog.load(path.join(dir, JOBS_FOLDER), ProjectLog._jobOptions(info, limits)),
       logs: SegmentLog.load(path.join(dir, LOGS_FOLDER), ProjectLog._logOptions(info, limits)),
-      dumps: SegmentLog.load(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits))
+      dumps: SegmentLog.load(path.join(dir, DUMPS_FOLDER), ProjectLog._dumpOptions(info, limits)),
+      mails: SegmentLog.load(path.join(dir, MAILS_FOLDER), ProjectLog._mailOptions(info, limits))
     });
   }
 
@@ -183,24 +201,83 @@ export class ProjectLog {
    */
   addSamples(instance, samples, now) {
     if (!samples.length) return;
-    let entry = this.runtime.get(instance.pid);
-    // A restarted process can reuse a pid: it starts its own history.
-    if (entry && entry.instance.startedAt !== instance.startedAt) entry = null;
-    if (!entry) entry = { instance: { ...instance }, samples: [] };
-    this.runtime.delete(instance.pid);
-    this.runtime.set(instance.pid, entry);
-    entry.instance = { ...instance };
-    entry.lastSeenAt = now;
+    const entry = this._runtimeEntry(instance, now);
     const last = entry.samples.length ? entry.samples[entry.samples.length - 1].at : -Infinity;
     for (const sample of samples) {
       if (sample.at > last) entry.samples.push(sample);
     }
     if (entry.samples.length > MAX_RUNTIME_SAMPLES) entry.samples.splice(0, entry.samples.length - MAX_RUNTIME_SAMPLES);
-    while (this.runtime.size > MAX_RUNTIME_PROCESSES) this.runtime.delete(this.runtime.keys().next().value);
   }
 
   /**
-   * The project's recent processes with their samples, the most recently seen first.
+   * Adds heap profiles of a project's process: each window's code locations are kept once, its
+   * bytes by location.
+   *
+   * @param {Object} instance - Process details, as checked in
+   * @param {{ at: number, reason: string, total: number, sites: Object[] }[]} windows - Validated
+   *   profiles, oldest first
+   * @param {number} now
+   * @returns {void}
+   */
+  addHeapWindows(instance, windows, now) {
+    if (!windows.length) return;
+    const entry = this._runtimeEntry(instance, now);
+    const heap = entry.heap;
+    for (const window of windows) {
+      const last = heap.windows.length ? heap.windows[heap.windows.length - 1].at : -Infinity;
+      if (window.at <= last) continue;
+      const bytes = {};
+      for (const { bytes: held, ...site } of window.sites) {
+        heap.sites.set(site.id, site);
+        bytes[site.id] = held;
+      }
+      heap.windows.push({ at: window.at, reason: window.reason, total: window.total, bytes });
+    }
+    heap.windows = thinHeapWindows(heap.windows, now);
+    // Locations no window names any more are dropped.
+    const named = new Set(heap.windows.flatMap((window) => Object.keys(window.bytes)));
+    for (const id of heap.sites.keys()) {
+      if (!named.has(id)) heap.sites.delete(id);
+    }
+  }
+
+  /**
+   * Adds windows of event-loop blocks of a project's process, with the functions that ran.
+   *
+   * @param {Object} instance - Process details, as checked in
+   * @param {{ at: number }[]} windows - Validated windows, oldest first
+   * @param {number} now
+   * @returns {void}
+   */
+  addBlockWindows(instance, windows, now) {
+    if (!windows.length) return;
+    const entry = this._runtimeEntry(instance, now);
+    for (const window of windows) {
+      const last = entry.blocks.length ? entry.blocks[entry.blocks.length - 1].at : -Infinity;
+      if (window.at > last) entry.blocks.push(window);
+    }
+    const kept = entry.blocks.filter((window) => now - window.at <= HEAP_KEEP_MS);
+    entry.blocks = kept.length > MAX_BLOCK_WINDOWS ? kept.slice(-MAX_BLOCK_WINDOWS) : kept;
+  }
+
+  // The runtime history of a process, the most recently seen last; a restarted process that
+  // reuses a pid starts its own.
+  _runtimeEntry(instance, now) {
+    let entry = this.runtime.get(instance.pid);
+    if (entry && entry.instance.startedAt !== instance.startedAt) entry = null;
+    if (!entry) entry = { instance: { ...instance }, samples: [], heap: { sites: new Map(), windows: [] }, blocks: [] };
+    this.runtime.delete(instance.pid);
+    this.runtime.set(instance.pid, entry);
+    entry.instance = { ...instance };
+    entry.lastSeenAt = now;
+    while (this.runtime.size > MAX_RUNTIME_PROCESSES) this.runtime.delete(this.runtime.keys().next().value);
+    return entry;
+  }
+
+  /**
+   * The project's recent processes with their samples, heap profiles and windows of event-loop
+   * blocks, the most recently seen first. `heap` and `blocks` are null for a process that sent none
+   * (an older SDK, or profiling off).
    *
    * @param {number} now
    * @returns {{ processes: Object[] }}
@@ -210,7 +287,9 @@ export class ProjectLog {
       ...entry.instance,
       lastSeenAt: entry.lastSeenAt,
       online: now - entry.lastSeenAt <= ONLINE_MS,
-      samples: entry.samples
+      samples: entry.samples,
+      heap: entry.heap.windows.length ? { sites: Object.fromEntries(entry.heap.sites), windows: entry.heap.windows } : null,
+      blocks: entry.blocks.length ? entry.blocks : null
     }));
     return { processes };
   }
@@ -286,6 +365,16 @@ export class ProjectLog {
    */
   detail(requestId) {
     return this.requests.detail(requestId);
+  }
+
+  /**
+   * One request's summary, as the request list shows it.
+   *
+   * @param {string} requestId
+   * @returns {Object|null} null when it is no longer stored
+   */
+  summary(requestId) {
+    return this.requests.summary(requestId);
   }
 
   /**
@@ -467,6 +556,48 @@ export class ProjectLog {
   }
 
   /**
+   * Stores new emails; ones already stored (same id) are skipped.
+   *
+   * @param {Object[]} records - Validated emails, with their detail (the message)
+   * @returns {Object[]}
+   */
+  appendMails(records) {
+    return this.mails.append(records);
+  }
+
+  /**
+   * Email summaries, newest first; oldest first when `after` is given.
+   *
+   * @param {{ after?: number, before?: number, limit: number }} query
+   * @returns {{ mails: Object[], hasMore: boolean }}
+   */
+  listMails(query) {
+    const { entries, hasMore } = this.mails.list(query);
+    return { mails: entries, hasMore };
+  }
+
+  /**
+   * One email's message.
+   *
+   * @param {string} mailId
+   * @returns {Object|null}
+   */
+  mailDetail(mailId) {
+    return this.mails.detail(mailId);
+  }
+
+  /**
+   * Deletes all emails.
+   *
+   * @returns {void}
+   */
+  clearMails() {
+    this.mails.clear();
+    this.info.mailSeqBase = this.mails.seqBase;
+    this.save();
+  }
+
+  /**
    * Deletes the project's folder.
    *
    * @returns {void}
@@ -495,6 +626,7 @@ export class ProjectLog {
     const newestException = this.exceptions.newest;
     const newestJob = this.jobs.newest;
     const newestDump = this.dumps.newest;
+    const newestMail = this.mails.newest;
     return {
       id: this.info.id,
       name: this.info.name,
@@ -510,6 +642,8 @@ export class ProjectLog {
       logCount: this.logs.size,
       dumpCount: this.dumps.size,
       lastDumpAt: newestDump ? newestDump.occurredAt : null,
+      mailCount: this.mails.size,
+      lastMailAt: newestMail ? newestMail.occurredAt : null,
       online: instances.length > 0,
       instances,
       blocked: this.info.blocked && now - this.info.blocked.lastAt < BLOCKED_NOTICE_MS ? this.info.blocked : null
@@ -549,6 +683,7 @@ export class ProjectLog {
     this.jobs.enforceRetention();
     this.logs.enforceRetention();
     this.dumps.enforceRetention();
+    this.mails.enforceRetention();
   }
 
   static _requestOptions(info, limits) {
@@ -565,6 +700,10 @@ export class ProjectLog {
 
   static _dumpOptions(info, limits) {
     return { maxEntries: limits.maxDumps, segmentSize: Math.max(10, Math.ceil(limits.maxDumps / 4)), seqBase: info.dumpSeqBase || 1, pick: pickDump };
+  }
+
+  static _mailOptions(info, limits) {
+    return { maxEntries: limits.maxMails, segmentSize: Math.max(10, Math.ceil(limits.maxMails / 4)), seqBase: info.mailSeqBase || 1, pick: pickMail };
   }
 
   static _exceptionOptions(info, limits) {
@@ -594,6 +733,8 @@ function pickSummary(source) {
   // Stored before route patterns were recorded, or from a framework that doesn't name them.
   if (summary.route === undefined) summary.route = null;
   if (summary.handler === undefined) summary.handler = null;
+  // Stored before replays, or not a replay.
+  if (summary.replayOf === undefined) summary.replayOf = null;
   return summary;
 }
 
@@ -613,6 +754,12 @@ function pickJob(source) {
   return summary;
 }
 
+function pickMail(source) {
+  const summary = {};
+  for (const field of MAIL_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
+  return summary;
+}
+
 function pickDump(source) {
   const summary = {};
   for (const field of DUMP_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
@@ -623,4 +770,17 @@ function pickLog(source) {
   const summary = {};
   for (const field of LOG_FIELDS) summary[field] = source[field] === undefined ? null : source[field];
   return summary;
+}
+
+// Profiles older than an hour, thinned to one every five minutes (those read as the heap neared
+// its limit are kept); older than six hours, dropped.
+function thinHeapWindows(windows, now) {
+  const kept = [];
+  for (const window of windows) {
+    if (now - window.at > HEAP_KEEP_MS) continue;
+    const previous = kept[kept.length - 1];
+    if (previous && now - window.at > HEAP_DENSE_MS && window.at - previous.at < HEAP_SPARSE_MS && window.reason !== 'pressure') continue;
+    kept.push(window);
+  }
+  return kept.length > MAX_HEAP_WINDOWS ? kept.slice(-MAX_HEAP_WINDOWS) : kept;
 }
