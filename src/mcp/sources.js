@@ -280,13 +280,15 @@ export class CloudSource {
   /**
    * @param {Object} options
    * @param {McpKey} options.key
-   * @param {string} options.siteUrl - PeekInside's address, such as "https://peekinside.dev"
+   * @param {string} options.siteUrl - PeekInside's address, such as "https://www.peekinside.dev"
+   * @param {string} [options.apiUrl] - Its API's, such as "https://api.peekinside.dev" (default: siteUrl)
    * @param {typeof fetch} [options.fetch]
    */
-  constructor({ key, siteUrl, fetch: fetchImpl = globalThis.fetch }) {
+  constructor({ key, siteUrl, apiUrl = siteUrl, fetch: fetchImpl = globalThis.fetch }) {
     this.key = key;
     this.cloud = true;
-    this._origin = new URL(siteUrl).origin;
+    this._origin = new URL(apiUrl).origin;
+    this._site = new URL(siteUrl).origin;
     this._fetch = fetchImpl;
     this._bearer = key.bearer();
     this._session = null;
@@ -322,7 +324,7 @@ export class CloudSource {
     }
     this.publicKey = opened.publicKey;
     this.opener = new Opener(opened.privateKey, opened.publicKey, 'event');
-    this.dashboardUrl = typeof body.dashboardUrl === 'string' ? body.dashboardUrl : `${this._origin}`;
+    this.dashboardUrl = typeof body.dashboardUrl === 'string' ? body.dashboardUrl : this._site;
     return {
       project: { id: body.project.id, name: String(body.project.name || body.project.id) },
       organization: body.organization || null,
